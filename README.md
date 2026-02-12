@@ -93,6 +93,11 @@ Auto mode (recommended):
 ./tools/build_luckfox_bridge.sh
 ```
 
+By default, the script also copies the fresh output to:
+- `luckfox_native/build/luckfox_bridge`
+
+So old commands keep working and you do not accidentally run a stale binary.
+
 Build and run immediately:
 
 ```bash
@@ -103,6 +108,12 @@ Force cross build for Luckfox ARMv7:
 
 ```bash
 CROSS_PREFIX=arm-buildroot-linux-uclibcgnueabihf- ./tools/build_luckfox_bridge.sh --target armv7
+```
+
+Disable legacy copy if needed:
+
+```bash
+./tools/build_luckfox_bridge.sh --legacy-sync off
 ```
 
 Output binary:

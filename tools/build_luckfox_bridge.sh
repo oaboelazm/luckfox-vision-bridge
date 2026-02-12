@@ -14,6 +14,7 @@ RUN_CONFIG="$ROOT_DIR/luckfox/config/default.json"
 RUN_EXTRA_ARGS=()
 CLEAN=0
 JOBS=""
+SYNC_LEGACY_PATH=1
 
 usage() {
   cat <<'EOF'
@@ -26,6 +27,7 @@ Options:
   --opencv <on|off>              Enable OpenCV lookup (default: on)
   --clean                         Remove build directory before configure
   --jobs <N>                      Parallel build jobs (default: auto)
+  --legacy-sync <on|off>          Copy built binary to luckfox_native/build/luckfox_bridge (default: on)
   --run                           Run binary after successful build
   --mode <apriltag|disabled>      Runtime mode used with --run
   --config <path>                 Runtime config path used with --run
@@ -87,6 +89,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --clean) CLEAN=1; shift ;;
     --jobs) JOBS="${2:-}"; shift 2 ;;
+    --legacy-sync)
+      case "${2:-}" in
+        on|ON) SYNC_LEGACY_PATH=1 ;;
+        off|OFF) SYNC_LEGACY_PATH=0 ;;
+        *) die "--legacy-sync must be on|off" ;;
+      esac
+      shift 2
+      ;;
     --run) RUN_AFTER_BUILD=1; shift ;;
     --mode) RUN_MODE="${2:-}"; shift 2 ;;
     --config) RUN_CONFIG="${2:-}"; shift 2 ;;
@@ -185,6 +195,22 @@ if command -v file >/dev/null 2>&1; then
   info "Binary info: $(file "$BIN")"
 else
   info "Binary built at: $BIN"
+fi
+
+info "Build output path: $BIN"
+
+if [[ "$SYNC_LEGACY_PATH" -eq 1 ]]; then
+  LEGACY_DIR="$SRC_DIR/build"
+  LEGACY_BIN="$LEGACY_DIR/luckfox_bridge"
+  mkdir -p "$LEGACY_DIR"
+  cp -f "$BIN" "$LEGACY_BIN"
+  chmod +x "$LEGACY_BIN" || true
+  if command -v file >/dev/null 2>&1; then
+    info "Legacy sync path: $LEGACY_BIN"
+    info "Legacy binary info: $(file "$LEGACY_BIN")"
+  else
+    info "Legacy sync path: $LEGACY_BIN"
+  fi
 fi
 
 if [[ "$RUN_AFTER_BUILD" -eq 1 ]]; then
