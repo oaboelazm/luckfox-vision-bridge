@@ -134,35 +134,35 @@ bool load_config(const std::string& path, Config* cfg) {
     const std::string raw = ss.str();
 
     std::string mode;
-    if (regex_str(raw, R"("runtime"\s*:\s*\{[\s\S]*?"mode"\s*:\s*"([^"]+)")", &mode)) cfg->mode = parse_mode(mode);
+    if (regex_str(raw, R"re("runtime"\s*:\s*\{[\s\S]*?"mode"\s*:\s*"([^"]+)")re", &mode)) cfg->mode = parse_mode(mode);
 
     bool dbg = false;
-    if (regex_bool(raw, R"("debug"\s*:\s*\{[\s\S]*?"enabled"\s*:\s*(true|false))", &dbg)) cfg->debug_enabled = dbg;
+    if (regex_bool(raw, R"re("debug"\s*:\s*\{[\s\S]*?"enabled"\s*:\s*(true|false))re", &dbg)) cfg->debug_enabled = dbg;
     double n = 0;
-    if (regex_num(raw, R"("debug"\s*:\s*\{[\s\S]*?"status_every_n"\s*:\s*([-0-9.]+))", &n)) cfg->debug_status_every_n = static_cast<int>(n);
+    if (regex_num(raw, R"re("debug"\s*:\s*\{[\s\S]*?"status_every_n"\s*:\s*([-0-9.]+))re", &n)) cfg->debug_status_every_n = static_cast<int>(n);
 
-    if (regex_num(raw, R"("device"\s*:\s*([-0-9.]+))", &n)) cfg->cam_device = static_cast<int>(n);
-    if (regex_num(raw, R"("width"\s*:\s*([-0-9.]+))", &n)) cfg->width = static_cast<int>(n);
-    if (regex_num(raw, R"("height"\s*:\s*([-0-9.]+))", &n)) cfg->height = static_cast<int>(n);
-    if (regex_num(raw, R"("fps"\s*:\s*([-0-9.]+))", &n)) cfg->fps = static_cast<int>(n);
-    if (regex_num(raw, R"("fx"\s*:\s*([-0-9.]+))", &n)) cfg->fx = static_cast<float>(n);
-    if (regex_num(raw, R"("fy"\s*:\s*([-0-9.]+))", &n)) cfg->fy = static_cast<float>(n);
-    if (regex_num(raw, R"("cx"\s*:\s*([-0-9.]+))", &n)) cfg->cx = static_cast<float>(n);
-    if (regex_num(raw, R"("cy"\s*:\s*([-0-9.]+))", &n)) cfg->cy = static_cast<float>(n);
-    if (regex_num(raw, R"("tag_size_m"\s*:\s*([-0-9.]+))", &n)) cfg->tag_size_m = static_cast<float>(n);
-    if (regex_num(raw, R"("apriltag"\s*:\s*\{[\s\S]*?"min_confidence"\s*:\s*([-0-9.]+))", &n)) cfg->min_confidence = static_cast<float>(n);
-    if (regex_num(raw, R"("apriltag"\s*:\s*\{[\s\S]*?"lost_timeout_ms"\s*:\s*([-0-9.]+))", &n)) cfg->lost_timeout_ms = static_cast<int>(n);
-    if (regex_num(raw, R"("baud"\s*:\s*([-0-9.]+))", &n)) cfg->uart_baud = static_cast<int>(n);
-    if (regex_num(raw, R"("send_rate_hz"\s*:\s*([-0-9.]+))", &n)) cfg->send_rate_hz = static_cast<int>(n);
-    if (regex_num(raw, R"("status_timeout_ms"\s*:\s*([-0-9.]+))", &n)) cfg->status_timeout_ms = static_cast<int>(n);
-    if (regex_num(raw, R"("target_ttl_ms"\s*:\s*([-0-9.]+))", &n)) cfg->target_ttl_ms = static_cast<int>(n);
-    if (regex_num(raw, R"("approach_z_m"\s*:\s*([-0-9.]+))", &n)) cfg->approach_z_m = static_cast<float>(n);
-    if (regex_num(raw, R"("hold_z_m"\s*:\s*([-0-9.]+))", &n)) cfg->hold_z_m = static_cast<float>(n);
-    if (regex_num(raw, R"("max_abs_offset_for_hold"\s*:\s*([-0-9.]+))", &n)) cfg->max_abs_offset_for_hold = static_cast<float>(n);
+    if (regex_num(raw, R"re("device"\s*:\s*([-0-9.]+))re", &n)) cfg->cam_device = static_cast<int>(n);
+    if (regex_num(raw, R"re("width"\s*:\s*([-0-9.]+))re", &n)) cfg->width = static_cast<int>(n);
+    if (regex_num(raw, R"re("height"\s*:\s*([-0-9.]+))re", &n)) cfg->height = static_cast<int>(n);
+    if (regex_num(raw, R"re("fps"\s*:\s*([-0-9.]+))re", &n)) cfg->fps = static_cast<int>(n);
+    if (regex_num(raw, R"re("fx"\s*:\s*([-0-9.]+))re", &n)) cfg->fx = static_cast<float>(n);
+    if (regex_num(raw, R"re("fy"\s*:\s*([-0-9.]+))re", &n)) cfg->fy = static_cast<float>(n);
+    if (regex_num(raw, R"re("cx"\s*:\s*([-0-9.]+))re", &n)) cfg->cx = static_cast<float>(n);
+    if (regex_num(raw, R"re("cy"\s*:\s*([-0-9.]+))re", &n)) cfg->cy = static_cast<float>(n);
+    if (regex_num(raw, R"re("tag_size_m"\s*:\s*([-0-9.]+))re", &n)) cfg->tag_size_m = static_cast<float>(n);
+    if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"min_confidence"\s*:\s*([-0-9.]+))re", &n)) cfg->min_confidence = static_cast<float>(n);
+    if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"lost_timeout_ms"\s*:\s*([-0-9.]+))re", &n)) cfg->lost_timeout_ms = static_cast<int>(n);
+    if (regex_num(raw, R"re("baud"\s*:\s*([-0-9.]+))re", &n)) cfg->uart_baud = static_cast<int>(n);
+    if (regex_num(raw, R"re("send_rate_hz"\s*:\s*([-0-9.]+))re", &n)) cfg->send_rate_hz = static_cast<int>(n);
+    if (regex_num(raw, R"re("status_timeout_ms"\s*:\s*([-0-9.]+))re", &n)) cfg->status_timeout_ms = static_cast<int>(n);
+    if (regex_num(raw, R"re("target_ttl_ms"\s*:\s*([-0-9.]+))re", &n)) cfg->target_ttl_ms = static_cast<int>(n);
+    if (regex_num(raw, R"re("approach_z_m"\s*:\s*([-0-9.]+))re", &n)) cfg->approach_z_m = static_cast<float>(n);
+    if (regex_num(raw, R"re("hold_z_m"\s*:\s*([-0-9.]+))re", &n)) cfg->hold_z_m = static_cast<float>(n);
+    if (regex_num(raw, R"re("max_abs_offset_for_hold"\s*:\s*([-0-9.]+))re", &n)) cfg->max_abs_offset_for_hold = static_cast<float>(n);
 
     std::string s;
-    if (regex_str(raw, R"("port"\s*:\s*"([^"]+)")", &s)) cfg->uart_port = s;
-    if (regex_str(raw, R"("csv_path"\s*:\s*"([^"]+)")", &s)) cfg->csv_path = s;
+    if (regex_str(raw, R"re("port"\s*:\s*"([^"]+)")re", &s)) cfg->uart_port = s;
+    if (regex_str(raw, R"re("csv_path"\s*:\s*"([^"]+)")re", &s)) cfg->csv_path = s;
     return true;
 }
 
@@ -423,7 +423,9 @@ int main(int argc, char** argv) {
 
     MissionState state = MissionState::Search;
     uint16_t seq = 0;
+#if defined(LVB_HAVE_OPENCV)
     int64_t last_seen_ms = 0;
+#endif
     int64_t last_status_ms = now_ms();
     std::vector<uint8_t> rx;
     const int period_ms = std::max(1, 1000 / std::max(1, cfg.send_rate_hz));
