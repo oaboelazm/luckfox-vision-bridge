@@ -10,6 +10,20 @@ This repo now uses:
 - `luckfox_native/` as the primary runtime (C/C++)
 - `luckfox/` Python folder as utility/testing scripts
 
+## Critical Build Requirement (Luckfox Pico SDK)
+
+Use **Luckfox Pico SDK toolchain** for deployment builds.
+
+If you build with default Codespaces host compilers, the output becomes `x86-64` and will not run on Luckfox (`armv7l`).
+
+Always verify build artifact architecture before copying:
+
+```bash
+file luckfox_native/build-armv7/luckfox_bridge
+```
+
+Expected: ARM ELF, not `x86-64`.
+
 ## Current Scope
 
 - AprilTag-only targeting (no plant model yet)
@@ -79,6 +93,14 @@ CLI overrides:
 - `--quiet` force debug off
 - `--no-uart` run camera/detection path without serial link
 
+You can also disable UART from config:
+
+```json
+"uart": {
+  "enabled": false
+}
+```
+
 ## Universal Build Script
 
 Use one script for native or cross build:
@@ -112,6 +134,14 @@ CROSS_PREFIX=arm-buildroot-linux-uclibcgnueabihf- ./tools/build_luckfox_bridge.s
 
 If no ARM toolchain is found, the script now fails immediately instead of silently using host `gcc/g++`.
 
+For SDK-based builds, point the script to SDK toolchain explicitly:
+
+```bash
+CC=/path/to/sdk/bin/arm-buildroot-linux-uclibcgnueabihf-gcc \
+CXX=/path/to/sdk/bin/arm-buildroot-linux-uclibcgnueabihf-g++ \
+./tools/build_luckfox_bridge.sh --target armv7 --clean
+```
+
 Disable legacy copy if needed:
 
 ```bash
@@ -130,6 +160,41 @@ If OpenCV is not available in your Buildroot image, CMake still builds the binar
 In that case, either:
 1. Enable OpenCV (with `aruco`, `calib3d`, `videoio`) in Buildroot, or
 2. Keep `mode=disabled` until the image is rebuilt.
+
+## Troubleshooting
+
+### `mode=apriltag` prints: `Binary built without OpenCV`
+
+Cause:
+- Runtime image / toolchain was built without OpenCV modules required by detector.
+
+Fix:
+1. Rebuild rootfs/SDK with OpenCV modules:
+   - `core`, `imgproc`, `videoio`, `calib3d`, `aruco`
+2. Rebuild `luckfox_bridge` with that SDK toolchain.
+
+### `mode=disabled` prints: `open(/dev/ttyS1) failed: No such file or directory`
+
+Cause:
+- Configured UART node does not exist on your image.
+
+Fix:
+1. Test without UART:
+   - add `--no-uart`, or set `"uart.enabled": false`
+2. Discover actual UART device:
+   - `ls /dev/ttyS* /dev/ttyAMA* /dev/ttyUSB* 2>/dev/null`
+3. Set correct `uart.port` in `luckfox/config/default.json`
+4. If UART nodes are missing entirely, enable them in board DTS/Buildroot and rebuild image.
+
+## Why RKNN Is Not Used Yet
+
+Current implementation is **AprilTag-only MVP**. AprilTag is classical marker detection and does not require NPU/RKNN.
+
+RKNN is intended for **plant/object neural detection** (Phase 2), which requires:
+1. Dataset collection + labeling
+2. Model training (YOLO-n class)
+3. ONNX -> RKNN conversion + quantization
+4. Runtime integration and arbitration with AprilTag
 
 ## Run (manual)
 

@@ -74,6 +74,7 @@ struct Config {
     float tag_size_m{0.14f};
     float min_confidence{0.65f};
     int lost_timeout_ms{300};
+    bool uart_enabled{true};
     std::string uart_port{"/dev/ttyS1"};
     int uart_baud{921600};
     int send_rate_hz{30};
@@ -152,6 +153,8 @@ bool load_config(const std::string& path, Config* cfg) {
     if (regex_num(raw, R"re("tag_size_m"\s*:\s*([-0-9.]+))re", &n)) cfg->tag_size_m = static_cast<float>(n);
     if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"min_confidence"\s*:\s*([-0-9.]+))re", &n)) cfg->min_confidence = static_cast<float>(n);
     if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"lost_timeout_ms"\s*:\s*([-0-9.]+))re", &n)) cfg->lost_timeout_ms = static_cast<int>(n);
+    bool uart_enabled = true;
+    if (regex_bool(raw, R"re("uart"\s*:\s*\{[\s\S]*?"enabled"\s*:\s*(true|false))re", &uart_enabled)) cfg->uart_enabled = uart_enabled;
     if (regex_num(raw, R"re("baud"\s*:\s*([-0-9.]+))re", &n)) cfg->uart_baud = static_cast<int>(n);
     if (regex_num(raw, R"re("send_rate_hz"\s*:\s*([-0-9.]+))re", &n)) cfg->send_rate_hz = static_cast<int>(n);
     if (regex_num(raw, R"re("status_timeout_ms"\s*:\s*([-0-9.]+))re", &n)) cfg->status_timeout_ms = static_cast<int>(n);
@@ -406,12 +409,15 @@ int main(int argc, char** argv) {
 #endif
 
     Uart uart;
-    if (!no_uart) {
+    const bool use_uart = cfg.uart_enabled && !no_uart;
+    if (use_uart) {
         std::string err;
         if (!uart.open_port(cfg.uart_port, cfg.uart_baud, &err)) {
             log_msg(LogLevel::Error, err);
             return 4;
         }
+    } else {
+        log_msg(LogLevel::Info, "UART disabled (config uart.enabled=false or --no-uart).");
     }
 
     std::ofstream log(cfg.csv_path, std::ios::app);
@@ -461,7 +467,7 @@ int main(int argc, char** argv) {
         int status_mode = -1;
         int status_ack = -1;
 
-        if (!no_uart) {
+        if (use_uart) {
             std::string err;
             if (!uart.write_all(pkt, &err)) {
                 frame_error = err;
