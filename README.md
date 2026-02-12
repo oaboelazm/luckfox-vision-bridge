@@ -79,16 +79,35 @@ CLI overrides:
 - `--quiet` force debug off
 - `--no-uart` run camera/detection path without serial link
 
-## Build (Luckfox Native)
+## Universal Build Script
+
+Use one script for native or cross build:
 
 ```bash
-cd luckfox_native
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+./tools/build_luckfox_bridge.sh --help
 ```
 
-Binary:
-- `luckfox_native/build/luckfox_bridge`
+Auto mode (recommended):
+
+```bash
+./tools/build_luckfox_bridge.sh
+```
+
+Build and run immediately:
+
+```bash
+./tools/build_luckfox_bridge.sh --run --mode apriltag -- --no-uart
+```
+
+Force cross build for Luckfox ARMv7:
+
+```bash
+CROSS_PREFIX=arm-buildroot-linux-uclibcgnueabihf- ./tools/build_luckfox_bridge.sh --target armv7
+```
+
+Output binary:
+- Native: `luckfox_native/build-native/luckfox_bridge`
+- ARMv7 cross: `luckfox_native/build-armv7/luckfox_bridge`
 
 ## Important Library Note
 
@@ -99,18 +118,18 @@ In that case, either:
 1. Enable OpenCV (with `aruco`, `calib3d`, `videoio`) in Buildroot, or
 2. Keep `mode=disabled` until the image is rebuilt.
 
-## Run
+## Run (manual)
 
 Normal run:
 
 ```bash
-./luckfox_native/build/luckfox_bridge --config luckfox/config/default.json --mode apriltag
+./luckfox_native/build-armv7/luckfox_bridge --config luckfox/config/default.json --mode apriltag
 ```
 
 Dry run without ESP32:
 
 ```bash
-./luckfox_native/build/luckfox_bridge --config luckfox/config/default.json --mode apriltag --no-uart
+./luckfox_native/build-armv7/luckfox_bridge --config luckfox/config/default.json --mode apriltag --no-uart
 ```
 
 ## Validate Quickly
