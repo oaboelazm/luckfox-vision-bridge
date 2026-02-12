@@ -1,0 +1,52 @@
+﻿{
+  "runtime": {
+    "engine": "native",
+    "mode": "apriltag"
+  },
+  "debug": {
+    "enabled": false,
+    "status_every_n": 30
+  },
+  "camera": {
+    "device": 0,
+    "width": 640,
+    "height": 480,
+    "fps": 30,
+    "intrinsics": {
+      "fx": 520.0,
+      "fy": 520.0,
+      "cx": 320.0,
+      "cy": 240.0
+    },
+    "distortion": [0.0, 0.0, 0.0, 0.0, 0.0],
+    "tag_size_m": 0.14
+  },
+  "apriltag": {
+    "family": "tag36h11",
+    "min_confidence": 0.65,
+    "lost_timeout_ms": 300
+  },
+  "plant": {
+    "enabled": false,
+    "model_path": "/root/models/plant_detector.rknn",
+    "input_size": 320,
+    "min_confidence": 0.60,
+    "target_class_id": 0
+  },
+  "uart": {
+    "port": "/dev/ttyS1",
+    "baud": 921600,
+    "fallback_baud": 460800,
+    "status_timeout_ms": 500,
+    "send_rate_hz": 30
+  },
+  "mission": {
+    "target_ttl_ms": 300,
+    "approach_z_m": 1.5,
+    "hold_z_m": 0.8,
+    "max_abs_offset_for_hold": 0.12
+  },
+  "logging": {
+    "csv_path": "/tmp/vision_bridge_log.csv"
+  }
+}
