@@ -110,6 +110,8 @@ Force cross build for Luckfox ARMv7:
 CROSS_PREFIX=arm-buildroot-linux-uclibcgnueabihf- ./tools/build_luckfox_bridge.sh --target armv7
 ```
 
+If no ARM toolchain is found, the script now fails immediately instead of silently using host `gcc/g++`.
+
 Disable legacy copy if needed:
 
 ```bash

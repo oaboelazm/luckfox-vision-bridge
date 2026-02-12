@@ -151,11 +151,20 @@ if [[ "$TARGET" == "armv7" ]]; then
     fi
   fi
 
+  if [[ -z "${CC:-}" && -z "${CXX:-}" && -z "$CROSS_PREFIX" ]]; then
+    die "No ARM cross toolchain detected. Set CROSS_PREFIX or CC/CXX explicitly."
+  fi
+
   CROSS_CC="${CC:-${CROSS_PREFIX}gcc}"
   CROSS_CXX="${CXX:-${CROSS_PREFIX}g++}"
 
   command -v "$CROSS_CC" >/dev/null 2>&1 || die "C compiler not found: $CROSS_CC"
   command -v "$CROSS_CXX" >/dev/null 2>&1 || die "C++ compiler not found: $CROSS_CXX"
+
+  DUMP_MACHINE="$("$CROSS_CXX" -dumpmachine 2>/dev/null || true)"
+  if [[ "$DUMP_MACHINE" != *arm* && "$DUMP_MACHINE" != *aarch64* ]]; then
+    die "Selected CXX compiler is not ARM: $CROSS_CXX (dumpmachine=$DUMP_MACHINE)"
+  fi
 
   CMAKE_ARGS+=(
     -DCMAKE_SYSTEM_NAME=Linux
