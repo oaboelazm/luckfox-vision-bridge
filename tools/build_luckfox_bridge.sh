@@ -172,8 +172,23 @@ if [[ "$TARGET" == "armv7" ]]; then
     "-DCMAKE_C_COMPILER=$CROSS_CC"
     "-DCMAKE_CXX_COMPILER=$CROSS_CXX"
   )
+
+  CROSS_PKG_CONFIG="${PKG_CONFIG_TOOL:-${CROSS_PREFIX}pkg-config}"
+  if command -v "$CROSS_PKG_CONFIG" >/dev/null 2>&1; then
+    CMAKE_ARGS+=("-DPKG_CONFIG_EXECUTABLE=$(command -v "$CROSS_PKG_CONFIG")")
+    info "PKG_CONFIG=$CROSS_PKG_CONFIG"
+  else
+    info "Cross pkg-config not found (${CROSS_PKG_CONFIG}). CMake pkg-config fallback may fail."
+  fi
+
+  if [[ -z "${SYSROOT:-}" ]]; then
+    SYSROOT="$("$CROSS_CXX" --print-sysroot 2>/dev/null || true)"
+  fi
   if [[ -n "${SYSROOT:-}" ]]; then
     CMAKE_ARGS+=("-DCMAKE_SYSROOT=$SYSROOT")
+    export PKG_CONFIG_SYSROOT_DIR="${PKG_CONFIG_SYSROOT_DIR:-$SYSROOT}"
+    export PKG_CONFIG_LIBDIR="${PKG_CONFIG_LIBDIR:-$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig:$SYSROOT/usr/lib/$DUMP_MACHINE/pkgconfig}"
+    info "SYSROOT=$SYSROOT"
   fi
 
   info "Cross build selected (armv7)"
