@@ -8,6 +8,7 @@ TARGET="auto"                  # auto|native|armv7
 BUILD_DIR=""
 BUILD_TYPE="Release"
 USE_OPENCV="ON"                # ON|OFF
+REQUIRE_OPENCV=0
 RUN_AFTER_BUILD=0
 RUN_MODE="apriltag"
 RUN_CONFIG="$ROOT_DIR/luckfox/config/default.json"
@@ -15,6 +16,7 @@ RUN_EXTRA_ARGS=()
 CLEAN=0
 JOBS=""
 SYNC_LEGACY_PATH=1
+STAGING_DIR="${STAGING_DIR:-}"
 
 usage() {
   cat <<'EOF'
@@ -25,6 +27,8 @@ Options:
   --build-dir <dir>              Custom build directory
   --build-type <type>            CMake build type (default: Release)
   --opencv <on|off>              Enable OpenCV lookup (default: on)
+  --require-opencv               Fail build if OpenCV is not detected
+  --staging-dir <dir>            Buildroot staging dir containing OpenCV dev files
   --clean                         Remove build directory before configure
   --jobs <N>                      Parallel build jobs (default: auto)
   --legacy-sync <on|off>          Copy built binary to luckfox_native/build/luckfox_bridge (default: on)
@@ -38,10 +42,12 @@ Cross-compile environment (for --target armv7):
   CC=<path-to-gcc>                Optional explicit C compiler
   CXX=<path-to-g++>               Optional explicit C++ compiler
   SYSROOT=<path>                  Optional CMake sysroot
+  STAGING_DIR=<path>              Optional Buildroot staging dir
 
 Examples:
   tools/build_luckfox_bridge.sh --target native --run --mode disabled
   CROSS_PREFIX=arm-buildroot-linux-uclibcgnueabihf- tools/build_luckfox_bridge.sh --target armv7
+  STAGING_DIR=/path/to/buildroot/output/staging CROSS_PREFIX=arm-rockchip830-linux-uclibcgnueabihf- tools/build_luckfox_bridge.sh --target armv7 --require-opencv
   tools/build_luckfox_bridge.sh --target armv7 --opencv off --run -- --no-uart --debug
 EOF
 }
@@ -74,6 +80,25 @@ find_cross_compiler() {
   return 1
 }
 
+guess_staging_dir() {
+  local toolchain_bin=""
+  toolchain_bin="$(dirname "$(command -v "${CROSS_CXX}")")"
+  local candidates=(
+    "$ROOT_DIR/../luckfox-pico/output/staging"
+    "$ROOT_DIR/../luckfox-pico/output/buildroot/output/staging"
+    "$ROOT_DIR/../luckfox-pico/buildroot/output/staging"
+    "$(cd "$toolchain_bin/../../../../.." 2>/dev/null && pwd)/output/staging"
+    "$(cd "$toolchain_bin/../../../../.." 2>/dev/null && pwd)/output/buildroot/output/staging"
+  )
+  for c in "${candidates[@]}"; do
+    if [[ -n "$c" && -d "$c" ]]; then
+      echo "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target) TARGET="${2:-}"; shift 2 ;;
@@ -87,6 +112,8 @@ while [[ $# -gt 0 ]]; do
       esac
       shift 2
       ;;
+    --require-opencv) REQUIRE_OPENCV=1; shift ;;
+    --staging-dir) STAGING_DIR="${2:-}"; shift 2 ;;
     --clean) CLEAN=1; shift ;;
     --jobs) JOBS="${2:-}"; shift 2 ;;
     --legacy-sync)
@@ -184,11 +211,37 @@ if [[ "$TARGET" == "armv7" ]]; then
   if [[ -z "${SYSROOT:-}" ]]; then
     SYSROOT="$("$CROSS_CXX" --print-sysroot 2>/dev/null || true)"
   fi
+
+  if [[ -z "$STAGING_DIR" ]]; then
+    STAGING_DIR="$(guess_staging_dir || true)"
+  fi
+  if [[ -n "$STAGING_DIR" && ! -d "$STAGING_DIR" ]]; then
+    die "Invalid --staging-dir: $STAGING_DIR"
+  fi
+
   if [[ -n "${SYSROOT:-}" ]]; then
     CMAKE_ARGS+=("-DCMAKE_SYSROOT=$SYSROOT")
-    export PKG_CONFIG_SYSROOT_DIR="${PKG_CONFIG_SYSROOT_DIR:-$SYSROOT}"
-    export PKG_CONFIG_LIBDIR="${PKG_CONFIG_LIBDIR:-$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig:$SYSROOT/usr/lib/$DUMP_MACHINE/pkgconfig}"
     info "SYSROOT=$SYSROOT"
+  fi
+
+  PC_ROOT="$SYSROOT"
+  if [[ -n "$STAGING_DIR" ]]; then
+    PC_ROOT="$STAGING_DIR"
+    CMAKE_ARGS+=(
+      "-DCMAKE_FIND_ROOT_PATH=$STAGING_DIR;$SYSROOT"
+      "-DCMAKE_PREFIX_PATH=$STAGING_DIR/usr"
+    )
+    info "STAGING_DIR=$STAGING_DIR"
+  fi
+
+  if [[ -n "${PC_ROOT:-}" ]]; then
+    export PKG_CONFIG_SYSROOT_DIR="${PKG_CONFIG_SYSROOT_DIR:-$PC_ROOT}"
+    export PKG_CONFIG_LIBDIR="${PKG_CONFIG_LIBDIR:-$PC_ROOT/usr/lib/pkgconfig:$PC_ROOT/usr/share/pkgconfig:$PC_ROOT/usr/lib/$DUMP_MACHINE/pkgconfig}"
+    if [[ -f "$PC_ROOT/usr/lib/pkgconfig/opencv4.pc" ]]; then
+      info "Found opencv4.pc at $PC_ROOT/usr/lib/pkgconfig/opencv4.pc"
+    elif [[ "$USE_OPENCV" == "ON" ]]; then
+      info "opencv4.pc not found under $PC_ROOT (this usually means OpenCV dev files are missing from staging)."
+    fi
   fi
 
   info "Cross build selected (armv7)"
@@ -200,6 +253,12 @@ fi
 
 info "Configuring CMake..."
 cmake "${CMAKE_ARGS[@]}"
+
+if [[ "$REQUIRE_OPENCV" -eq 1 ]]; then
+  if ! grep -q "LVB_HAVE_OPENCV=1" "$BUILD_DIR/CMakeFiles/luckfox_bridge.dir/flags.make" 2>/dev/null; then
+    die "OpenCV was not detected in this build. Recheck STAGING_DIR/OpenCV packages."
+  fi
+fi
 
 if [[ -z "$JOBS" ]]; then
   if command -v nproc >/dev/null 2>&1; then

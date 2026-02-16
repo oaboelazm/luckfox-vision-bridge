@@ -142,6 +142,14 @@ CXX=/path/to/sdk/bin/arm-buildroot-linux-uclibcgnueabihf-g++ \
 ./tools/build_luckfox_bridge.sh --target armv7 --clean
 ```
 
+If OpenCV is in Buildroot staging (common with Luckfox SDK), pass it explicitly and require detection:
+
+```bash
+STAGING_DIR=/path/to/luckfox-pico/output/staging \
+CROSS_PREFIX=arm-rockchip830-linux-uclibcgnueabihf- \
+./tools/build_luckfox_bridge.sh --target armv7 --clean --require-opencv
+```
+
 Disable legacy copy if needed:
 
 ```bash
@@ -185,6 +193,27 @@ Fix:
    - `ls /dev/ttyS* /dev/ttyAMA* /dev/ttyUSB* 2>/dev/null`
 3. Set correct `uart.port` in `luckfox/config/default.json`
 4. If UART nodes are missing entirely, enable them in board DTS/Buildroot and rebuild image.
+
+### `mode=apriltag` prints: `Failed to open camera device`
+
+Cause:
+- OpenCV video backend cannot open/probe the configured camera node.
+- Common reasons: wrong `/dev/videoX`, camera busy by another process, unsupported pixel format/backend mismatch.
+
+Fix:
+1. Set explicit camera path in config:
+
+```json
+"camera": {
+  "device": 0,
+  "device_path": "/dev/video0"
+}
+```
+
+2. If your stream works on another node, use it (for example `/dev/video11`).
+3. Make sure no process is locking camera:
+   - `fuser /dev/video0 /dev/video11 2>/dev/null`
+4. Keep `debug.enabled=true` and check startup diagnostics; the app now logs all attempted open methods (`CAP_V4L2` and fallback).
 
 ## Why RKNN Is Not Used Yet
 

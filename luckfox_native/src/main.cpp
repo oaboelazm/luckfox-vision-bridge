@@ -64,6 +64,7 @@ struct Config {
     bool debug_enabled{false};
     int debug_status_every_n{30};
     int cam_device{0};
+    std::string cam_device_path{};
     int width{640};
     int height{480};
     int fps{30};
@@ -143,6 +144,8 @@ bool load_config(const std::string& path, Config* cfg) {
     if (regex_num(raw, R"re("debug"\s*:\s*\{[\s\S]*?"status_every_n"\s*:\s*([-0-9.]+))re", &n)) cfg->debug_status_every_n = static_cast<int>(n);
 
     if (regex_num(raw, R"re("device"\s*:\s*([-0-9.]+))re", &n)) cfg->cam_device = static_cast<int>(n);
+    std::string camera_path;
+    if (regex_str(raw, R"re("camera"\s*:\s*\{[\s\S]*?"device_path"\s*:\s*"([^"]*)")re", &camera_path)) cfg->cam_device_path = camera_path;
     if (regex_num(raw, R"re("width"\s*:\s*([-0-9.]+))re", &n)) cfg->width = static_cast<int>(n);
     if (regex_num(raw, R"re("height"\s*:\s*([-0-9.]+))re", &n)) cfg->height = static_cast<int>(n);
     if (regex_num(raw, R"re("fps"\s*:\s*([-0-9.]+))re", &n)) cfg->fps = static_cast<int>(n);
@@ -308,6 +311,78 @@ MissionState update_mission(const Config& cfg, const std::optional<TargetSample>
 }
 
 #if defined(LVB_HAVE_OPENCV)
+bool probe_camera(cv::VideoCapture* cap, const Config& cfg, std::string* err) {
+    cap->set(cv::CAP_PROP_FRAME_WIDTH, cfg.width);
+    cap->set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
+    cap->set(cv::CAP_PROP_FPS, cfg.fps);
+
+    cv::Mat probe;
+    if (!cap->read(probe) || probe.empty()) {
+        *err = "opened but could not read a frame (device busy, unsupported pixel format, or wrong node)";
+        return false;
+    }
+    return true;
+}
+
+bool open_camera_with_diagnostics(const Config& cfg, cv::VideoCapture* cap, std::string* diag) {
+    std::vector<std::string> attempts;
+    auto try_open_idx = [&](int idx, int api, const std::string& api_name) -> bool {
+        cv::VideoCapture local(idx, api);
+        if (!local.isOpened()) {
+            attempts.push_back("index " + std::to_string(idx) + " via " + api_name + ": open failed");
+            return false;
+        }
+        std::string err;
+        if (!probe_camera(&local, cfg, &err)) {
+            attempts.push_back("index " + std::to_string(idx) + " via " + api_name + ": " + err);
+            local.release();
+            return false;
+        }
+        *cap = std::move(local);
+        attempts.push_back("index " + std::to_string(idx) + " via " + api_name + ": success");
+        return true;
+    };
+    auto try_open_path = [&](const std::string& path, int api, const std::string& api_name) -> bool {
+        cv::VideoCapture local(path, api);
+        if (!local.isOpened()) {
+            attempts.push_back("path " + path + " via " + api_name + ": open failed");
+            return false;
+        }
+        std::string err;
+        if (!probe_camera(&local, cfg, &err)) {
+            attempts.push_back("path " + path + " via " + api_name + ": " + err);
+            local.release();
+            return false;
+        }
+        *cap = std::move(local);
+        attempts.push_back("path " + path + " via " + api_name + ": success");
+        return true;
+    };
+
+    if (!cfg.cam_device_path.empty()) {
+        if (try_open_path(cfg.cam_device_path, cv::CAP_V4L2, "CAP_V4L2")) return true;
+        if (try_open_path(cfg.cam_device_path, cv::CAP_ANY, "CAP_ANY")) return true;
+    }
+
+    if (try_open_idx(cfg.cam_device, cv::CAP_V4L2, "CAP_V4L2")) return true;
+    if (try_open_idx(cfg.cam_device, cv::CAP_ANY, "CAP_ANY")) return true;
+
+    std::vector<int> fallback_indices{0, 11, 1, 2};
+    for (int idx : fallback_indices) {
+        if (idx == cfg.cam_device) continue;
+        if (try_open_idx(idx, cv::CAP_V4L2, "CAP_V4L2")) return true;
+    }
+
+    std::ostringstream oss;
+    oss << "camera open failed after trying: ";
+    for (size_t i = 0; i < attempts.size(); ++i) {
+        if (i > 0) oss << " | ";
+        oss << attempts[i];
+    }
+    *diag = oss.str();
+    return false;
+}
+
 std::optional<TargetSample> detect_apriltag(const Config& cfg, cv::VideoCapture* cap, int64_t* last_seen_ms) {
     cv::Mat frame;
     if (!cap->read(frame) || frame.empty()) return std::nullopt;
@@ -398,13 +473,15 @@ int main(int argc, char** argv) {
 #endif
 
 #if defined(LVB_HAVE_OPENCV)
-    cv::VideoCapture cap(cfg.cam_device);
-    cap.set(cv::CAP_PROP_FRAME_WIDTH, cfg.width);
-    cap.set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
-    cap.set(cv::CAP_PROP_FPS, cfg.fps);
-    if (cfg.mode == RuntimeMode::AprilTag && !cap.isOpened()) {
-        log_msg(LogLevel::Error, "Failed to open camera device " + std::to_string(cfg.cam_device));
-        return 3;
+    cv::VideoCapture cap;
+    if (cfg.mode == RuntimeMode::AprilTag) {
+        std::string cam_diag;
+        if (!open_camera_with_diagnostics(cfg, &cap, &cam_diag)) {
+            log_msg(LogLevel::Error, "Failed to open camera. " + cam_diag);
+            log_msg(LogLevel::Error, "Try setting camera.device_path (e.g. /dev/video0 or /dev/video11) and verify no other process owns the device.");
+            return 3;
+        }
+        log_msg(LogLevel::Info, "Camera opened successfully.");
     }
 #endif
 
