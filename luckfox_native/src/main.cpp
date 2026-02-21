@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <errno.h>
@@ -11,6 +12,7 @@
 #include <signal.h>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/select.h>
@@ -105,6 +107,15 @@ volatile sig_atomic_t g_stop = 0;
 
 void handle_signal(int) {
     g_stop = 1;
+}
+
+void install_signal_handlers() {
+    struct sigaction sa {};
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
 }
 
 void log_msg(LogLevel level, const std::string& msg) {
@@ -433,10 +444,14 @@ public:
         FD_ZERO(&fds);
         FD_SET(fd_, &fds);
         timeval tv{};
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000;
         int rv = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
         if (rv <= 0) {
+            if (rv < 0 && errno == EINTR) {
+                *err = "interrupted";
+                return false;
+            }
             *err = (rv == 0) ? "v4l2 timeout" : ("select failed: " + std::string(std::strerror(errno)));
             return false;
         }
@@ -741,6 +756,19 @@ void annotate_debug_frame(
         cv::putText(*frame, "err=" + frame_error, cv::Point(10, 76), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 255), 1);
     }
 }
+
+bool ensure_dir(const std::string& path, std::string* err) {
+    if (mkdir(path.c_str(), 0755) == 0) return true;
+    if (errno == EEXIST) return true;
+    *err = "mkdir(" + path + ") failed: " + std::string(std::strerror(errno));
+    return false;
+}
+
+bool try_open_debug_writer(const std::string& path, int fourcc, int fps, const cv::Size& size, cv::VideoWriter* out_writer) {
+    if (out_writer->open(path, cv::CAP_FFMPEG, fourcc, fps, size, true)) return true;
+    if (out_writer->open(path, cv::CAP_GSTREAMER, fourcc, fps, size, true)) return true;
+    return false;
+}
 #endif
 
 void usage() {
@@ -775,8 +803,7 @@ int main(int argc, char** argv) {
     if (force_debug) cfg.debug_enabled = true;
     if (force_quiet) cfg.debug_enabled = false;
     g_log_level = cfg.debug_enabled ? LogLevel::Debug : LogLevel::Info;
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
+    install_signal_handlers();
 
     log_msg(LogLevel::Info, std::string("Build: ") + __DATE__ + " " + __TIME__);
     log_msg(LogLevel::Info, "Starting luckfox_bridge mode=" + std::string(cfg.mode == RuntimeMode::AprilTag ? "apriltag" : "disabled"));
@@ -795,6 +822,10 @@ int main(int argc, char** argv) {
     bool use_v4l2_fallback = false;
     cv::VideoWriter debug_writer;
     bool debug_writer_opened = false;
+    bool debug_sequence_mode = false;
+    bool debug_output_error_reported = false;
+    uint64_t debug_sequence_idx = 0;
+    std::string debug_sequence_dir;
     if (cfg.mode == RuntimeMode::AprilTag) {
         if (cfg.debug_enabled) {
             const std::string summary = opencv_videoio_summary();
@@ -865,6 +896,9 @@ int main(int argc, char** argv) {
                 cv::Mat gray;
                 std::string read_err;
                 if (!v4l2_fallback.read_gray(&gray, &read_err)) {
+                    if (read_err == "interrupted" && g_stop) {
+                        break;
+                    }
                     frame_error = "v4l2_read_gray_failed: " + read_err;
                 } else {
                     cv::cvtColor(gray, debug_frame, cv::COLOR_GRAY2BGR);
@@ -932,18 +966,39 @@ int main(int argc, char** argv) {
 #if defined(LVB_HAVE_OPENCV)
         if (cfg.debug_enabled && !debug_frame.empty()) {
             annotate_debug_frame(&debug_frame, seq, state, target, frame_error);
-            if (!debug_writer_opened) {
+            if (!debug_writer_opened && !debug_sequence_mode) {
                 const int fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
                 int out_fps = std::max(1, cfg.fps > 0 ? cfg.fps : cfg.send_rate_hz);
-                if (debug_writer.open(cfg.annotated_video_path, fourcc, out_fps, debug_frame.size(), true)) {
+                if (try_open_debug_writer(cfg.annotated_video_path, fourcc, out_fps, debug_frame.size(), &debug_writer)) {
                     debug_writer_opened = true;
                     log_msg(LogLevel::Info, "Debug annotated video recording: " + cfg.annotated_video_path);
                 } else {
-                    log_msg(LogLevel::Error, "Failed to open debug video writer: " + cfg.annotated_video_path);
+                    std::string mk_err;
+                    debug_sequence_dir = cfg.annotated_video_path + ".frames";
+                    if (ensure_dir(debug_sequence_dir, &mk_err)) {
+                        debug_sequence_mode = true;
+                        log_msg(LogLevel::Info, "VideoWriter unavailable; using JPEG frame sequence: " + debug_sequence_dir);
+                    } else {
+                        log_msg(LogLevel::Error, "Failed to open debug video writer and fallback dir. " + mk_err);
+                        debug_output_error_reported = true;
+                    }
                 }
             }
             if (debug_writer_opened) {
                 debug_writer.write(debug_frame);
+            } else if (debug_sequence_mode) {
+                ++debug_sequence_idx;
+                char name[512];
+                std::snprintf(name, sizeof(name), "%s/frame_%06llu.jpg", debug_sequence_dir.c_str(), static_cast<unsigned long long>(debug_sequence_idx));
+                try {
+                    cv::imwrite(name, debug_frame);
+                } catch (const cv::Exception& e) {
+                    frame_error = "imwrite_failed";
+                    if (!debug_output_error_reported) {
+                        log_msg(LogLevel::Error, std::string("Failed to write debug frame: ") + e.what());
+                        debug_output_error_reported = true;
+                    }
+                }
             }
         }
 #endif
@@ -969,6 +1024,14 @@ int main(int argc, char** argv) {
     if (debug_writer_opened) {
         debug_writer.release();
         log_msg(LogLevel::Info, "Debug video saved: " + cfg.annotated_video_path);
+    } else if (debug_sequence_mode) {
+        std::ostringstream oss;
+        oss << "Debug frames saved: " << debug_sequence_dir << " (" << debug_sequence_idx << " frames). "
+            << "Convert using: ffmpeg -framerate "
+            << std::max(1, cfg.fps > 0 ? cfg.fps : cfg.send_rate_hz)
+            << " -i " << debug_sequence_dir << "/frame_%06d.jpg -c:v libx264 -pix_fmt yuv420p "
+            << cfg.annotated_video_path;
+        log_msg(LogLevel::Info, oss.str());
     }
 #endif
     log_msg(LogLevel::Info, "Shutdown complete.");

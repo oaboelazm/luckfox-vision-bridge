@@ -120,6 +120,15 @@ Run and stop with `Ctrl+C`:
 On clean stop, the app prints:
 - `Debug video saved: /tmp/vision_bridge_annotated.avi`
 
+If OpenCV `VideoWriter` is not available on your Buildroot image, the app now falls back automatically to:
+- `/tmp/vision_bridge_annotated.avi.frames/frame_000001.jpg`, ...
+
+Then convert on host:
+
+```bash
+ffmpeg -framerate 30 -i /tmp/vision_bridge_annotated.avi.frames/frame_%06d.jpg -c:v libx264 -pix_fmt yuv420p /tmp/vision_bridge_annotated.avi
+```
+
 Copy video to your laptop for inspection:
 
 ```bash
