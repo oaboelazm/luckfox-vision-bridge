@@ -10,10 +10,14 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/select.h>
 #include <termios.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <linux/videodev2.h>
 
 #if defined(LVB_HAVE_OPENCV)
 #include <opencv2/aruco.hpp>
@@ -85,6 +89,13 @@ struct Config {
     float hold_z_m{0.8f};
     float max_abs_offset_for_hold{0.12f};
     std::string csv_path{"/tmp/vision_bridge_log.csv"};
+};
+
+struct V4L2Buffer {
+    void* y{nullptr};
+    size_t y_len{0};
+    void* uv{nullptr};
+    size_t uv_len{0};
 };
 
 LogLevel g_log_level = LogLevel::Info;
@@ -311,6 +322,210 @@ MissionState update_mission(const Config& cfg, const std::optional<TargetSample>
 }
 
 #if defined(LVB_HAVE_OPENCV)
+class V4L2GrayCapture {
+public:
+    ~V4L2GrayCapture() { close_dev(); }
+
+    bool open_dev(const std::string& path, int width, int height, int fps, std::string* err) {
+        close_dev();
+        fd_ = ::open(path.c_str(), O_RDWR);
+        if (fd_ < 0) {
+            *err = "v4l2 open failed: " + std::string(std::strerror(errno));
+            return false;
+        }
+        path_ = path;
+
+        v4l2_format fmt{};
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        fmt.fmt.pix_mp.width = width;
+        fmt.fmt.pix_mp.height = height;
+        fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+        fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
+        if (ioctl(fd_, VIDIOC_S_FMT, &fmt) < 0) {
+            close_dev();
+            *err = "VIDIOC_S_FMT NV12 mplane failed: " + std::string(std::strerror(errno));
+            return false;
+        }
+        width_ = static_cast<int>(fmt.fmt.pix_mp.width);
+        height_ = static_cast<int>(fmt.fmt.pix_mp.height);
+
+        v4l2_streamparm parm{};
+        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        parm.parm.capture.timeperframe.numerator = 1;
+        parm.parm.capture.timeperframe.denominator = fps > 0 ? fps : 30;
+        ioctl(fd_, VIDIOC_S_PARM, &parm);
+
+        v4l2_requestbuffers req{};
+        req.count = 4;
+        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        req.memory = V4L2_MEMORY_MMAP;
+        if (ioctl(fd_, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
+            close_dev();
+            *err = "VIDIOC_REQBUFS failed: " + std::string(std::strerror(errno));
+            return false;
+        }
+
+        bufs_.assign(req.count, {});
+        for (uint32_t i = 0; i < req.count; ++i) {
+            v4l2_buffer b{};
+            v4l2_plane planes[2]{};
+            b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            b.memory = V4L2_MEMORY_MMAP;
+            b.index = i;
+            b.m.planes = planes;
+            b.length = 2;
+            if (ioctl(fd_, VIDIOC_QUERYBUF, &b) < 0) {
+                close_dev();
+                *err = "VIDIOC_QUERYBUF failed: " + std::string(std::strerror(errno));
+                return false;
+            }
+
+            bufs_[i].y_len = b.m.planes[0].length;
+            bufs_[i].y = mmap(nullptr, bufs_[i].y_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, b.m.planes[0].m.mem_offset);
+            if (bufs_[i].y == MAP_FAILED) {
+                close_dev();
+                *err = "mmap y plane failed: " + std::string(std::strerror(errno));
+                return false;
+            }
+
+            if (b.m.planes[1].length > 0) {
+                bufs_[i].uv_len = b.m.planes[1].length;
+                bufs_[i].uv = mmap(nullptr, bufs_[i].uv_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, b.m.planes[1].m.mem_offset);
+                if (bufs_[i].uv == MAP_FAILED) {
+                    close_dev();
+                    *err = "mmap uv plane failed: " + std::string(std::strerror(errno));
+                    return false;
+                }
+            }
+
+            if (ioctl(fd_, VIDIOC_QBUF, &b) < 0) {
+                close_dev();
+                *err = "VIDIOC_QBUF init failed: " + std::string(std::strerror(errno));
+                return false;
+            }
+        }
+
+        v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        if (ioctl(fd_, VIDIOC_STREAMON, &t) < 0) {
+            close_dev();
+            *err = "VIDIOC_STREAMON failed: " + std::string(std::strerror(errno));
+            return false;
+        }
+        streaming_ = true;
+        return true;
+    }
+
+    bool read_gray(cv::Mat* gray, std::string* err) {
+        if (fd_ < 0) {
+            *err = "v4l2 not opened";
+            return false;
+        }
+
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd_, &fds);
+        timeval tv{};
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        int rv = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
+        if (rv <= 0) {
+            *err = (rv == 0) ? "v4l2 timeout" : ("select failed: " + std::string(std::strerror(errno)));
+            return false;
+        }
+
+        v4l2_buffer b{};
+        v4l2_plane planes[2]{};
+        b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        b.memory = V4L2_MEMORY_MMAP;
+        b.m.planes = planes;
+        b.length = 2;
+        if (ioctl(fd_, VIDIOC_DQBUF, &b) < 0) {
+            *err = "VIDIOC_DQBUF failed: " + std::string(std::strerror(errno));
+            return false;
+        }
+
+        if (b.index >= bufs_.size() || bufs_[b.index].y == nullptr) {
+            *err = "invalid buffer index";
+            return false;
+        }
+        cv::Mat y(height_, width_, CV_8UC1, bufs_[b.index].y);
+        y.copyTo(*gray);
+
+        if (ioctl(fd_, VIDIOC_QBUF, &b) < 0) {
+            *err = "VIDIOC_QBUF failed: " + std::string(std::strerror(errno));
+            return false;
+        }
+        return true;
+    }
+
+private:
+    void close_dev() {
+        if (fd_ >= 0 && streaming_) {
+            v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            ioctl(fd_, VIDIOC_STREAMOFF, &t);
+        }
+        streaming_ = false;
+        for (auto& b : bufs_) {
+            if (b.y && b.y != MAP_FAILED) munmap(b.y, b.y_len);
+            if (b.uv && b.uv != MAP_FAILED) munmap(b.uv, b.uv_len);
+            b = {};
+        }
+        bufs_.clear();
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    int fd_{-1};
+    std::string path_{};
+    int width_{0};
+    int height_{0};
+    bool streaming_{false};
+    std::vector<V4L2Buffer> bufs_{};
+};
+
+std::optional<TargetSample> detect_apriltag_gray(const Config& cfg, const cv::Mat& gray, int64_t* last_seen_ms) {
+    auto dict = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_APRILTAG_36h11);
+    std::vector<int> ids;
+    std::vector<std::vector<cv::Point2f>> corners;
+    cv::aruco::detectMarkers(gray, dict, corners, ids);
+    if (ids.empty()) return std::nullopt;
+
+    size_t best = 0;
+    float best_area = 0.f;
+    for (size_t i = 0; i < corners.size(); ++i) {
+        const float area = std::abs(static_cast<float>(cv::contourArea(corners[i])));
+        if (area > best_area) { best_area = area; best = i; }
+    }
+
+    std::vector<std::vector<cv::Point2f>> chosen{corners[best]};
+    cv::Mat K = (cv::Mat_<double>(3, 3) << cfg.fx, 0.0, cfg.cx, 0.0, cfg.fy, cfg.cy, 0.0, 0.0, 1.0);
+    cv::Mat D = cv::Mat::zeros(1, 5, CV_64F);
+    std::vector<cv::Vec3d> rvecs, tvecs;
+    cv::aruco::estimatePoseSingleMarkers(chosen, cfg.tag_size_m, K, D, rvecs, tvecs);
+
+    cv::Point2f center(0.f, 0.f);
+    for (const auto& p : chosen[0]) center += p;
+    center *= 0.25f;
+    const float dx = (center.x - cfg.width * 0.5f) / (cfg.width * 0.5f);
+    const float dy = (center.y - cfg.height * 0.5f) / (cfg.height * 0.5f);
+
+    float z = 9.99f;
+    if (!tvecs.empty()) z = static_cast<float>(tvecs[0][2]);
+    float yaw = 0.0f;
+    if (!rvecs.empty()) {
+        cv::Mat R;
+        cv::Rodrigues(rvecs[0], R);
+        yaw = static_cast<float>(std::atan2(R.at<double>(1, 0), R.at<double>(0, 0)) * 180.0 / CV_PI);
+    }
+
+    const float confidence = std::min(1.0f, best_area / static_cast<float>(cfg.width * cfg.height * 0.10f));
+    if (confidence < cfg.min_confidence) return std::nullopt;
+    *last_seen_ms = now_ms();
+    return TargetSample{now_ms(), dx, dy, z, yaw, confidence};
+}
+
 std::string opencv_videoio_summary() {
     std::istringstream in(cv::getBuildInformation());
     std::ostringstream out;
@@ -521,6 +736,8 @@ int main(int argc, char** argv) {
 
 #if defined(LVB_HAVE_OPENCV)
     cv::VideoCapture cap;
+    V4L2GrayCapture v4l2_fallback;
+    bool use_v4l2_fallback = false;
     if (cfg.mode == RuntimeMode::AprilTag) {
         if (cfg.debug_enabled) {
             const std::string summary = opencv_videoio_summary();
@@ -532,11 +749,19 @@ int main(int argc, char** argv) {
         }
         std::string cam_diag;
         if (!open_camera_with_diagnostics(cfg, &cap, &cam_diag)) {
-            log_msg(LogLevel::Error, "Failed to open camera. " + cam_diag);
-            log_msg(LogLevel::Error, "Try setting camera.device_path (e.g. /dev/video0 or /dev/video11) and verify no other process owns the device.");
-            return 3;
+            log_msg(LogLevel::Error, "OpenCV camera open failed. " + cam_diag);
+            const std::string fallback_node = cfg.cam_device_path.empty() ? ("/dev/video" + std::to_string(cfg.cam_device)) : cfg.cam_device_path;
+            std::string v4l2_err;
+            if (!v4l2_fallback.open_dev(fallback_node, cfg.width, cfg.height, cfg.fps, &v4l2_err)) {
+                log_msg(LogLevel::Error, "V4L2 direct fallback failed on " + fallback_node + ": " + v4l2_err);
+                log_msg(LogLevel::Error, "Set camera.device_path to an ISP node (often /dev/video11) and ensure no process owns the camera.");
+                return 3;
+            }
+            use_v4l2_fallback = true;
+            log_msg(LogLevel::Info, "Camera opened via V4L2 direct fallback on " + fallback_node);
+        } else {
+            log_msg(LogLevel::Info, "Camera opened successfully.");
         }
-        log_msg(LogLevel::Info, "Camera opened successfully.");
     }
 #endif
 
@@ -576,7 +801,17 @@ int main(int argc, char** argv) {
 
         if (cfg.mode == RuntimeMode::AprilTag) {
 #if defined(LVB_HAVE_OPENCV)
-            target = detect_apriltag(cfg, &cap, &last_seen_ms);
+            if (use_v4l2_fallback) {
+                cv::Mat gray;
+                std::string read_err;
+                if (!v4l2_fallback.read_gray(&gray, &read_err)) {
+                    frame_error = "v4l2_read_gray_failed: " + read_err;
+                } else {
+                    target = detect_apriltag_gray(cfg, gray, &last_seen_ms);
+                }
+            } else {
+                target = detect_apriltag(cfg, &cap, &last_seen_ms);
+            }
 #else
             frame_error = "apriltag_unavailable_no_opencv";
 #endif
