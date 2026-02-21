@@ -8,6 +8,7 @@
 #include <iostream>
 #include <optional>
 #include <regex>
+#include <signal.h>
 #include <sstream>
 #include <string>
 #include <sys/ioctl.h>
@@ -89,6 +90,7 @@ struct Config {
     float hold_z_m{0.8f};
     float max_abs_offset_for_hold{0.12f};
     std::string csv_path{"/tmp/vision_bridge_log.csv"};
+    std::string annotated_video_path{"/tmp/vision_bridge_annotated.avi"};
 };
 
 struct V4L2Buffer {
@@ -99,6 +101,11 @@ struct V4L2Buffer {
 };
 
 LogLevel g_log_level = LogLevel::Info;
+volatile sig_atomic_t g_stop = 0;
+
+void handle_signal(int) {
+    g_stop = 1;
+}
 
 void log_msg(LogLevel level, const std::string& msg) {
     if (static_cast<int>(level) > static_cast<int>(g_log_level)) {
@@ -180,6 +187,7 @@ bool load_config(const std::string& path, Config* cfg) {
     std::string s;
     if (regex_str(raw, R"re("port"\s*:\s*"([^"]+)")re", &s)) cfg->uart_port = s;
     if (regex_str(raw, R"re("csv_path"\s*:\s*"([^"]+)")re", &s)) cfg->csv_path = s;
+    if (regex_str(raw, R"re("annotated_video_path"\s*:\s*"([^"]+)")re", &s)) cfg->annotated_video_path = s;
     return true;
 }
 
@@ -643,9 +651,12 @@ bool open_camera_with_diagnostics(const Config& cfg, cv::VideoCapture* cap, std:
     return false;
 }
 
-std::optional<TargetSample> detect_apriltag(const Config& cfg, cv::VideoCapture* cap, int64_t* last_seen_ms) {
+std::optional<TargetSample> detect_apriltag(const Config& cfg, cv::VideoCapture* cap, int64_t* last_seen_ms, cv::Mat* frame_bgr_out) {
     cv::Mat frame;
     if (!cap->read(frame) || frame.empty()) return std::nullopt;
+    if (frame_bgr_out) {
+        *frame_bgr_out = frame;
+    }
 
     cv::Mat gray;
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
@@ -688,6 +699,48 @@ std::optional<TargetSample> detect_apriltag(const Config& cfg, cv::VideoCapture*
     *last_seen_ms = now_ms();
     return TargetSample{now_ms(), dx, dy, z, yaw, confidence};
 }
+
+void annotate_debug_frame(
+    cv::Mat* frame,
+    uint16_t seq,
+    MissionState state,
+    const std::optional<TargetSample>& target,
+    const std::string& frame_error
+) {
+    if (frame == nullptr || frame->empty()) return;
+
+    const int w = frame->cols;
+    const int h = frame->rows;
+
+    cv::line(*frame, cv::Point(w / 2, 0), cv::Point(w / 2, h), cv::Scalar(80, 80, 80), 1);
+    cv::line(*frame, cv::Point(0, h / 2), cv::Point(w, h / 2), cv::Scalar(80, 80, 80), 1);
+
+    std::ostringstream l1;
+    l1 << "seq=" << seq << " state=" << static_cast<int>(state);
+    cv::putText(*frame, l1.str(), cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 255), 2);
+
+    if (target.has_value()) {
+        const auto& t = target.value();
+        int px = static_cast<int>((t.dx_norm * 0.5f + 0.5f) * w);
+        int py = static_cast<int>((t.dy_norm * 0.5f + 0.5f) * h);
+        px = std::max(0, std::min(w - 1, px));
+        py = std::max(0, std::min(h - 1, py));
+        cv::circle(*frame, cv::Point(px, py), 10, cv::Scalar(0, 255, 0), 2);
+        cv::line(*frame, cv::Point(px - 14, py), cv::Point(px + 14, py), cv::Scalar(0, 255, 0), 2);
+        cv::line(*frame, cv::Point(px, py - 14), cv::Point(px, py + 14), cv::Scalar(0, 255, 0), 2);
+
+        std::ostringstream l2;
+        l2 << "target=1 conf=" << t.confidence << " dx=" << t.dx_norm << " dy=" << t.dy_norm
+           << " z=" << t.z_est_m << " yaw=" << t.yaw_err_deg;
+        cv::putText(*frame, l2.str(), cv::Point(10, 50), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 255, 0), 2);
+    } else {
+        cv::putText(*frame, "target=0", cv::Point(10, 50), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 0, 255), 2);
+    }
+
+    if (!frame_error.empty()) {
+        cv::putText(*frame, "err=" + frame_error, cv::Point(10, 76), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 255), 1);
+    }
+}
 #endif
 
 void usage() {
@@ -722,6 +775,8 @@ int main(int argc, char** argv) {
     if (force_debug) cfg.debug_enabled = true;
     if (force_quiet) cfg.debug_enabled = false;
     g_log_level = cfg.debug_enabled ? LogLevel::Debug : LogLevel::Info;
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     log_msg(LogLevel::Info, std::string("Build: ") + __DATE__ + " " + __TIME__);
     log_msg(LogLevel::Info, "Starting luckfox_bridge mode=" + std::string(cfg.mode == RuntimeMode::AprilTag ? "apriltag" : "disabled"));
@@ -738,6 +793,8 @@ int main(int argc, char** argv) {
     cv::VideoCapture cap;
     V4L2GrayCapture v4l2_fallback;
     bool use_v4l2_fallback = false;
+    cv::VideoWriter debug_writer;
+    bool debug_writer_opened = false;
     if (cfg.mode == RuntimeMode::AprilTag) {
         if (cfg.debug_enabled) {
             const std::string summary = opencv_videoio_summary();
@@ -794,10 +851,13 @@ int main(int argc, char** argv) {
     const int period_ms = std::max(1, 1000 / std::max(1, cfg.send_rate_hz));
     int frame_idx = 0;
 
-    while (true) {
+    while (!g_stop) {
         const int64_t t0 = now_ms();
         std::optional<TargetSample> target = std::nullopt;
         std::string frame_error;
+#if defined(LVB_HAVE_OPENCV)
+        cv::Mat debug_frame;
+#endif
 
         if (cfg.mode == RuntimeMode::AprilTag) {
 #if defined(LVB_HAVE_OPENCV)
@@ -807,10 +867,11 @@ int main(int argc, char** argv) {
                 if (!v4l2_fallback.read_gray(&gray, &read_err)) {
                     frame_error = "v4l2_read_gray_failed: " + read_err;
                 } else {
+                    cv::cvtColor(gray, debug_frame, cv::COLOR_GRAY2BGR);
                     target = detect_apriltag_gray(cfg, gray, &last_seen_ms);
                 }
             } else {
-                target = detect_apriltag(cfg, &cap, &last_seen_ms);
+                target = detect_apriltag(cfg, &cap, &last_seen_ms, &debug_frame);
             }
 #else
             frame_error = "apriltag_unavailable_no_opencv";
@@ -868,6 +929,25 @@ int main(int argc, char** argv) {
             << frame.dx_norm << "," << frame.dy_norm << "," << frame.z_est_m << ","
             << status_mode << "," << status_ack << "," << (frame_error.empty() ? "none" : frame_error) << "\n";
 
+#if defined(LVB_HAVE_OPENCV)
+        if (cfg.debug_enabled && !debug_frame.empty()) {
+            annotate_debug_frame(&debug_frame, seq, state, target, frame_error);
+            if (!debug_writer_opened) {
+                const int fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+                int out_fps = std::max(1, cfg.fps > 0 ? cfg.fps : cfg.send_rate_hz);
+                if (debug_writer.open(cfg.annotated_video_path, fourcc, out_fps, debug_frame.size(), true)) {
+                    debug_writer_opened = true;
+                    log_msg(LogLevel::Info, "Debug annotated video recording: " + cfg.annotated_video_path);
+                } else {
+                    log_msg(LogLevel::Error, "Failed to open debug video writer: " + cfg.annotated_video_path);
+                }
+            }
+            if (debug_writer_opened) {
+                debug_writer.write(debug_frame);
+            }
+        }
+#endif
+
         if (cfg.debug_enabled && (++frame_idx % std::max(1, cfg.debug_status_every_n) == 0)) {
             std::ostringstream oss;
             oss << "seq=" << seq << " state=" << static_cast<int>(state)
@@ -884,4 +964,13 @@ int main(int argc, char** argv) {
         const int64_t elapsed = now_ms() - t0;
         if (elapsed < period_ms) std::this_thread::sleep_for(std::chrono::milliseconds(period_ms - elapsed));
     }
+
+#if defined(LVB_HAVE_OPENCV)
+    if (debug_writer_opened) {
+        debug_writer.release();
+        log_msg(LogLevel::Info, "Debug video saved: " + cfg.annotated_video_path);
+    }
+#endif
+    log_msg(LogLevel::Info, "Shutdown complete.");
+    return 0;
 }

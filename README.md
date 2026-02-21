@@ -87,6 +87,7 @@ Behavior:
 - Prints periodic debug line every `status_every_n` frames.
 - All hard errors print explicit reason (`errno` + message where applicable).
 - CSV includes an `error` column for per-frame error state.
+- In debug mode, writes an annotated video with overlays (state, confidence, `dx/dy/z/yaw`, and target marker).
 
 CLI overrides:
 - `--debug` force debug on
@@ -99,6 +100,30 @@ You can also disable UART from config:
 "uart": {
   "enabled": false
 }
+```
+
+Set debug video output path in config:
+
+```json
+"logging": {
+  "csv_path": "/tmp/vision_bridge_log.csv",
+  "annotated_video_path": "/tmp/vision_bridge_annotated.avi"
+}
+```
+
+Run and stop with `Ctrl+C`:
+
+```bash
+/root/luckfox_bridge --config /root/luckfox/config/default.json --mode apriltag --no-uart --debug
+```
+
+On clean stop, the app prints:
+- `Debug video saved: /tmp/vision_bridge_annotated.avi`
+
+Copy video to your laptop for inspection:
+
+```bash
+scp root@<LUCKFOX_IP>:/tmp/vision_bridge_annotated.avi .
 ```
 
 ## Universal Build Script
@@ -216,6 +241,132 @@ Fix:
 4. Keep `debug.enabled=true` and check startup diagnostics; the app now logs all attempted open methods (`CAP_V4L2` and fallback).
 5. With `--debug`, the app also prints OpenCV Video I/O build summary (V4L/FFmpeg/GStreamer) and a direct POSIX probe for the selected `/dev/videoX`.
 6. If OpenCV backends fail to open the camera node, the app now tries a direct V4L2 mmap fallback (NV12 mplane) for AprilTag mode.
+
+### After reboot: `VIDIOC_S_FMT ... Device or resource busy`
+
+Cause:
+- Camera service (`rkipc`) auto-starts again after reboot and locks `/dev/video11`.
+
+How to confirm:
+
+```sh
+fuser /dev/video0 /dev/video11 2>/dev/null
+ps | grep -E "rtsp|rkipc|isp|camera" | grep -v grep
+```
+
+If you see `rkipc`, camera is busy.
+
+Temporary fix (every boot):
+
+```sh
+killall rkipc 2>/dev/null
+killall rtsp 2>/dev/null
+v4l2-ctl --device=/dev/video11 --stream-mmap=3 --stream-count=30
+```
+
+If `v4l2-ctl` shows stable FPS (e.g. `25.00 fps`), run the app:
+
+```sh
+/root/luckfox_bridge --config /root/luckfox/config/default.json --mode apriltag --no-uart --debug
+```
+
+Permanent fix (recommended):
+1. Disable `rkipc` auto-start script/service in your image startup.
+2. Keep only one process owning camera during AprilTag runtime.
+
+Check likely init scripts:
+
+```sh
+ls /etc/init.d | grep -Ei "rkipc|rtsp|camera"
+```
+
+Then disable/remove startup entry according to your init system.
+
+### Camera Busy Recovery (Practical Checklist)
+
+When AprilTag fails after reboot with camera busy errors, use this exact sequence:
+
+```sh
+# 1) Find who owns the camera node
+fuser /dev/video0 /dev/video11 2>/dev/null
+
+# 2) Identify process details (replace 4080 with actual PID from fuser)
+cat /proc/4080/comm
+cat /proc/4080/cmdline | tr '\0' ' '; echo
+readlink /proc/4080/exe
+
+# 3) Stop known camera services
+killall rkipc 2>/dev/null
+killall rtsp 2>/dev/null
+killall ispserver 2>/dev/null
+killall rkaiq_3A_server 2>/dev/null
+
+# 4) Kill remaining owner PID directly if still busy
+kill -9 4080 2>/dev/null
+
+# 5) Confirm camera is free
+fuser /dev/video0 /dev/video11 2>/dev/null
+
+# 6) Validate streaming directly
+v4l2-ctl --device=/dev/video11 --stream-mmap=3 --stream-count=30
+```
+
+If step 6 shows stable FPS, run the app:
+
+```sh
+/root/luckfox_bridge --config /root/luckfox/config/default.json --mode apriltag --no-uart --debug
+```
+
+Recommended camera config:
+
+```json
+"camera": {
+  "device_path": "/dev/video11"
+}
+```
+
+### Prevent Auto-Restart of Camera Service
+
+If camera lock returns every reboot, disable auto-start of camera daemon:
+
+```sh
+ls -l /etc/init.d/S91rkipc
+/etc/init.d/S91rkipc stop
+chmod -x /etc/init.d/S91rkipc
+```
+
+Then reboot and re-test ownership with `fuser`.
+
+### Why Keep OpenCV Capture Path If V4L2 Fallback Works?
+
+Short answer: keep both for now.
+
+- On your current image, direct V4L2 fallback is the reliable path.
+- OpenCV VideoCapture path is still useful for portability across other images/boards where backends are correctly enabled.
+- Keeping both has no major runtime penalty (only small startup attempts before fallback).
+- Removing OpenCV path now may reduce flexibility for future deployment variants.
+
+So current recommendation:
+1. Keep OpenCV path in code.
+2. Use V4L2 fallback operationally on this board.
+3. Revisit removal only after finalizing one fixed production image.
+
+### End-to-end on-board checklist
+
+1. Ensure camera free:
+   - `killall rkipc 2>/dev/null`
+2. Ensure stream node works:
+   - `v4l2-ctl --device=/dev/video11 --stream-mmap=3 --stream-count=30`
+3. Use config:
+   - `camera.device_path = "/dev/video11"`
+   - `debug.enabled = true`
+4. Run AprilTag:
+   - `/root/luckfox_bridge --config /root/luckfox/config/default.json --mode apriltag --no-uart --debug`
+5. Detection success signs:
+   - `target=1`
+   - `conf > 0`
+   - `dx/dy/z` change while moving tag.
+   - Annotated video shows center crosshair + moving target marker and changing telemetry text.
 
 If camera is exposed through RTSP in your setup, set:
 

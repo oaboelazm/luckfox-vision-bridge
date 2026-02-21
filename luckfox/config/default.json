@@ -50,6 +50,7 @@
     "max_abs_offset_for_hold": 0.12
   },
   "logging": {
-    "csv_path": "/tmp/vision_bridge_log.csv"
+    "csv_path": "/tmp/vision_bridge_log.csv",
+    "annotated_video_path": "/tmp/vision_bridge_annotated.avi"
   }
 }
