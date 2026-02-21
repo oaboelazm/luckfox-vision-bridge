@@ -214,6 +214,7 @@ Fix:
 3. Make sure no process is locking camera:
    - `fuser /dev/video0 /dev/video11 2>/dev/null`
 4. Keep `debug.enabled=true` and check startup diagnostics; the app now logs all attempted open methods (`CAP_V4L2` and fallback).
+5. With `--debug`, the app also prints OpenCV Video I/O build summary (V4L/FFmpeg/GStreamer) and a direct POSIX probe for the selected `/dev/videoX`.
 
 If camera is exposed through RTSP in your setup, set:
 

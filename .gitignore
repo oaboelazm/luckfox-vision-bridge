@@ -12,3 +12,7 @@ esp32/sdkconfig
 # Local data/models
 models/
 data/
+
+#builds
+luckfox_native/build/
+luckfox_native/build-armv7/

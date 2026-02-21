@@ -311,6 +311,42 @@ MissionState update_mission(const Config& cfg, const std::optional<TargetSample>
 }
 
 #if defined(LVB_HAVE_OPENCV)
+std::string opencv_videoio_summary() {
+    std::istringstream in(cv::getBuildInformation());
+    std::ostringstream out;
+    bool in_videoio = false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.find("Video I/O:") != std::string::npos) {
+            in_videoio = true;
+            out << line << "\n";
+            continue;
+        }
+        if (in_videoio) {
+            if (line.find("Parallel framework:") != std::string::npos || line.find("Other third-party libraries:") != std::string::npos) {
+                break;
+            }
+            if (line.find("FFMPEG") != std::string::npos ||
+                line.find("GStreamer") != std::string::npos ||
+                line.find("v4l") != std::string::npos ||
+                line.find("V4L") != std::string::npos) {
+                out << line << "\n";
+            }
+        }
+    }
+    return out.str();
+}
+
+std::string posix_probe_camera_node(const std::string& node) {
+    if (node.empty()) return "node=<empty>";
+    int fd = ::open(node.c_str(), O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        return "open(" + node + ") failed: errno=" + std::to_string(errno) + " " + std::strerror(errno);
+    }
+    ::close(fd);
+    return "open(" + node + ") success";
+}
+
 bool probe_camera(cv::VideoCapture* cap, const Config& cfg, std::string* err) {
     cap->set(cv::CAP_PROP_FRAME_WIDTH, cfg.width);
     cap->set(cv::CAP_PROP_FRAME_HEIGHT, cfg.height);
@@ -486,6 +522,14 @@ int main(int argc, char** argv) {
 #if defined(LVB_HAVE_OPENCV)
     cv::VideoCapture cap;
     if (cfg.mode == RuntimeMode::AprilTag) {
+        if (cfg.debug_enabled) {
+            const std::string summary = opencv_videoio_summary();
+            if (!summary.empty()) {
+                log_msg(LogLevel::Debug, summary);
+            }
+            const std::string node_to_probe = cfg.cam_device_path.empty() ? ("/dev/video" + std::to_string(cfg.cam_device)) : cfg.cam_device_path;
+            log_msg(LogLevel::Debug, "POSIX probe: " + posix_probe_camera_node(node_to_probe));
+        }
         std::string cam_diag;
         if (!open_camera_with_diagnostics(cfg, &cap, &cam_diag)) {
             log_msg(LogLevel::Error, "Failed to open camera. " + cam_diag);
