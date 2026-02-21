@@ -215,6 +215,34 @@ Fix:
    - `fuser /dev/video0 /dev/video11 2>/dev/null`
 4. Keep `debug.enabled=true` and check startup diagnostics; the app now logs all attempted open methods (`CAP_V4L2` and fallback).
 
+If camera is exposed through RTSP in your setup, set:
+
+```json
+"camera": {
+  "rtsp_url": "rtsp://<ip>:<port>/<path>"
+}
+```
+
+and run with `--debug`. The app prints available OpenCV VideoIO backends at startup.
+
+### You still see old error text after rebuilding
+
+If runtime output still shows old messages (for example exact old text like `Failed to open camera device 0`), you are likely running a stale binary on the board.
+
+Use this flow:
+
+```bash
+# on build machine
+file luckfox_native/build-armv7/luckfox_bridge
+scp luckfox_native/build-armv7/luckfox_bridge root@<luckfox-ip>:/root/luckfox_bridge
+
+# on luckfox
+chmod +x /root/luckfox_bridge
+/root/luckfox_bridge --config /root/luckfox/config/default.json --mode apriltag --no-uart --debug
+```
+
+The updated binary prints a `Build: <date time>` line at startup; use it to verify you are running the latest build.
+
 ## Why RKNN Is Not Used Yet
 
 Current implementation is **AprilTag-only MVP**. AprilTag is classical marker detection and does not require NPU/RKNN.

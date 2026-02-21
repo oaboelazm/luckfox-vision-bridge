@@ -361,7 +361,16 @@ bool open_camera_with_diagnostics(const Config& cfg, cv::VideoCapture* cap, std:
 
     if (!cfg.cam_device_path.empty()) {
         if (try_open_path(cfg.cam_device_path, cv::CAP_V4L2, "CAP_V4L2")) return true;
+        if (try_open_path(cfg.cam_device_path, cv::CAP_GSTREAMER, "CAP_GSTREAMER")) return true;
+        if (try_open_path(cfg.cam_device_path, cv::CAP_FFMPEG, "CAP_FFMPEG")) return true;
         if (try_open_path(cfg.cam_device_path, cv::CAP_ANY, "CAP_ANY")) return true;
+    }
+
+    std::vector<std::string> fallback_paths{"/dev/video11", "/dev/video0", "/dev/video1", "/dev/video2"};
+    for (const auto& p : fallback_paths) {
+        if (!cfg.cam_device_path.empty() && p == cfg.cam_device_path) continue;
+        if (try_open_path(p, cv::CAP_V4L2, "CAP_V4L2")) return true;
+        if (try_open_path(p, cv::CAP_ANY, "CAP_ANY")) return true;
     }
 
     if (try_open_idx(cfg.cam_device, cv::CAP_V4L2, "CAP_V4L2")) return true;
@@ -463,7 +472,9 @@ int main(int argc, char** argv) {
     if (force_quiet) cfg.debug_enabled = false;
     g_log_level = cfg.debug_enabled ? LogLevel::Debug : LogLevel::Info;
 
+    log_msg(LogLevel::Info, std::string("Build: ") + __DATE__ + " " + __TIME__);
     log_msg(LogLevel::Info, "Starting luckfox_bridge mode=" + std::string(cfg.mode == RuntimeMode::AprilTag ? "apriltag" : "disabled"));
+    log_msg(LogLevel::Info, "Camera config: device=" + std::to_string(cfg.cam_device) + " device_path=" + (cfg.cam_device_path.empty() ? "<empty>" : cfg.cam_device_path));
 
 #if !defined(LVB_HAVE_OPENCV)
     if (cfg.mode == RuntimeMode::AprilTag) {
