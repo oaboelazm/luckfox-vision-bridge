@@ -1,6 +1,5 @@
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <errno.h>
@@ -12,7 +11,6 @@
 #include <signal.h>
 #include <sstream>
 #include <string>
-#include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/select.h>
@@ -81,6 +79,7 @@ struct Config {
     float cy{240.f};
     float tag_size_m{0.14f};
     float min_confidence{0.65f};
+    float confidence_full_area_ratio{0.02f};
     int lost_timeout_ms{300};
     bool uart_enabled{true};
     std::string uart_port{"/dev/ttyS1"};
@@ -184,6 +183,7 @@ bool load_config(const std::string& path, Config* cfg) {
     if (regex_num(raw, R"re("cy"\s*:\s*([-0-9.]+))re", &n)) cfg->cy = static_cast<float>(n);
     if (regex_num(raw, R"re("tag_size_m"\s*:\s*([-0-9.]+))re", &n)) cfg->tag_size_m = static_cast<float>(n);
     if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"min_confidence"\s*:\s*([-0-9.]+))re", &n)) cfg->min_confidence = static_cast<float>(n);
+    if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"confidence_full_area_ratio"\s*:\s*([-0-9.]+))re", &n)) cfg->confidence_full_area_ratio = static_cast<float>(n);
     if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"lost_timeout_ms"\s*:\s*([-0-9.]+))re", &n)) cfg->lost_timeout_ms = static_cast<int>(n);
     bool uart_enabled = true;
     if (regex_bool(raw, R"re("uart"\s*:\s*\{[\s\S]*?"enabled"\s*:\s*(true|false))re", &uart_enabled)) cfg->uart_enabled = uart_enabled;
@@ -543,7 +543,8 @@ std::optional<TargetSample> detect_apriltag_gray(const Config& cfg, const cv::Ma
         yaw = static_cast<float>(std::atan2(R.at<double>(1, 0), R.at<double>(0, 0)) * 180.0 / CV_PI);
     }
 
-    const float confidence = std::min(1.0f, best_area / static_cast<float>(cfg.width * cfg.height * 0.10f));
+    const float full_area = static_cast<float>(cfg.width * cfg.height) * std::max(0.001f, cfg.confidence_full_area_ratio);
+    const float confidence = std::min(1.0f, best_area / full_area);
     if (confidence < cfg.min_confidence) return std::nullopt;
     *last_seen_ms = now_ms();
     return TargetSample{now_ms(), dx, dy, z, yaw, confidence};
@@ -709,7 +710,8 @@ std::optional<TargetSample> detect_apriltag(const Config& cfg, cv::VideoCapture*
         yaw = static_cast<float>(std::atan2(R.at<double>(1, 0), R.at<double>(0, 0)) * 180.0 / CV_PI);
     }
 
-    const float confidence = std::min(1.0f, best_area / static_cast<float>(cfg.width * cfg.height * 0.10f));
+    const float full_area = static_cast<float>(cfg.width * cfg.height) * std::max(0.001f, cfg.confidence_full_area_ratio);
+    const float confidence = std::min(1.0f, best_area / full_area);
     if (confidence < cfg.min_confidence) return std::nullopt;
     *last_seen_ms = now_ms();
     return TargetSample{now_ms(), dx, dy, z, yaw, confidence};
@@ -757,18 +759,76 @@ void annotate_debug_frame(
     }
 }
 
-bool ensure_dir(const std::string& path, std::string* err) {
-    if (mkdir(path.c_str(), 0755) == 0) return true;
-    if (errno == EEXIST) return true;
-    *err = "mkdir(" + path + ") failed: " + std::string(std::strerror(errno));
-    return false;
-}
-
 bool try_open_debug_writer(const std::string& path, int fourcc, int fps, const cv::Size& size, cv::VideoWriter* out_writer) {
     if (out_writer->open(path, cv::CAP_FFMPEG, fourcc, fps, size, true)) return true;
     if (out_writer->open(path, cv::CAP_GSTREAMER, fourcc, fps, size, true)) return true;
     return false;
 }
+
+class Y4MWriter {
+public:
+    bool open_file(const std::string& path, int width, int height, int fps, std::string* err) {
+        close_file();
+        out_.open(path, std::ios::binary);
+        if (!out_.is_open()) {
+            *err = "open(" + path + ") failed";
+            return false;
+        }
+        width_ = width;
+        height_ = height;
+        fps_ = std::max(1, fps);
+        path_ = path;
+        out_ << "YUV4MPEG2 W" << width_ << " H" << height_ << " F" << fps_ << ":1 Ip A1:1 C420jpeg\n";
+        if (!out_.good()) {
+            *err = "failed to write y4m header";
+            close_file();
+            return false;
+        }
+        return true;
+    }
+
+    bool write_bgr(const cv::Mat& bgr, std::string* err) {
+        if (!out_.is_open()) {
+            *err = "y4m writer not open";
+            return false;
+        }
+        if (bgr.empty()) {
+            *err = "empty frame";
+            return false;
+        }
+        cv::Mat resized;
+        if (bgr.cols != width_ || bgr.rows != height_) {
+            cv::resize(bgr, resized, cv::Size(width_, height_));
+        } else {
+            resized = bgr;
+        }
+        cv::Mat yuv_i420;
+        cv::cvtColor(resized, yuv_i420, cv::COLOR_BGR2YUV_I420);
+        out_ << "FRAME\n";
+        out_.write(reinterpret_cast<const char*>(yuv_i420.data), static_cast<std::streamsize>(yuv_i420.total() * yuv_i420.elemSize()));
+        if (!out_.good()) {
+            *err = "failed writing y4m frame";
+            return false;
+        }
+        return true;
+    }
+
+    void close_file() {
+        if (out_.is_open()) {
+            out_.flush();
+            out_.close();
+        }
+    }
+
+    ~Y4MWriter() { close_file(); }
+
+private:
+    std::ofstream out_{};
+    int width_{0};
+    int height_{0};
+    int fps_{30};
+    std::string path_{};
+};
 #endif
 
 void usage() {
@@ -821,11 +881,11 @@ int main(int argc, char** argv) {
     V4L2GrayCapture v4l2_fallback;
     bool use_v4l2_fallback = false;
     cv::VideoWriter debug_writer;
+    Y4MWriter debug_y4m_writer;
     bool debug_writer_opened = false;
-    bool debug_sequence_mode = false;
+    bool debug_y4m_mode = false;
     bool debug_output_error_reported = false;
-    uint64_t debug_sequence_idx = 0;
-    std::string debug_sequence_dir;
+    std::string debug_y4m_path;
     if (cfg.mode == RuntimeMode::AprilTag) {
         if (cfg.debug_enabled) {
             const std::string summary = opencv_videoio_summary();
@@ -966,36 +1026,32 @@ int main(int argc, char** argv) {
 #if defined(LVB_HAVE_OPENCV)
         if (cfg.debug_enabled && !debug_frame.empty()) {
             annotate_debug_frame(&debug_frame, seq, state, target, frame_error);
-            if (!debug_writer_opened && !debug_sequence_mode) {
+            if (!debug_writer_opened && !debug_y4m_mode) {
                 const int fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
                 int out_fps = std::max(1, cfg.fps > 0 ? cfg.fps : cfg.send_rate_hz);
                 if (try_open_debug_writer(cfg.annotated_video_path, fourcc, out_fps, debug_frame.size(), &debug_writer)) {
                     debug_writer_opened = true;
                     log_msg(LogLevel::Info, "Debug annotated video recording: " + cfg.annotated_video_path);
                 } else {
-                    std::string mk_err;
-                    debug_sequence_dir = cfg.annotated_video_path + ".frames";
-                    if (ensure_dir(debug_sequence_dir, &mk_err)) {
-                        debug_sequence_mode = true;
-                        log_msg(LogLevel::Info, "VideoWriter unavailable; using JPEG frame sequence: " + debug_sequence_dir);
+                    std::string y4m_err;
+                    debug_y4m_path = cfg.annotated_video_path + ".y4m";
+                    if (debug_y4m_writer.open_file(debug_y4m_path, debug_frame.cols, debug_frame.rows, out_fps, &y4m_err)) {
+                        debug_y4m_mode = true;
+                        log_msg(LogLevel::Info, "VideoWriter unavailable; using Y4M fallback: " + debug_y4m_path);
                     } else {
-                        log_msg(LogLevel::Error, "Failed to open debug video writer and fallback dir. " + mk_err);
+                        log_msg(LogLevel::Error, "Failed to open debug video writer and Y4M fallback. " + y4m_err);
                         debug_output_error_reported = true;
                     }
                 }
             }
             if (debug_writer_opened) {
                 debug_writer.write(debug_frame);
-            } else if (debug_sequence_mode) {
-                ++debug_sequence_idx;
-                char name[512];
-                std::snprintf(name, sizeof(name), "%s/frame_%06llu.jpg", debug_sequence_dir.c_str(), static_cast<unsigned long long>(debug_sequence_idx));
-                try {
-                    cv::imwrite(name, debug_frame);
-                } catch (const cv::Exception& e) {
-                    frame_error = "imwrite_failed";
+            } else if (debug_y4m_mode) {
+                std::string y4m_err;
+                if (!debug_y4m_writer.write_bgr(debug_frame, &y4m_err)) {
+                    frame_error = "y4m_write_failed";
                     if (!debug_output_error_reported) {
-                        log_msg(LogLevel::Error, std::string("Failed to write debug frame: ") + e.what());
+                        log_msg(LogLevel::Error, "Failed to write Y4M debug frame: " + y4m_err);
                         debug_output_error_reported = true;
                     }
                 }
@@ -1024,12 +1080,11 @@ int main(int argc, char** argv) {
     if (debug_writer_opened) {
         debug_writer.release();
         log_msg(LogLevel::Info, "Debug video saved: " + cfg.annotated_video_path);
-    } else if (debug_sequence_mode) {
+    } else if (debug_y4m_mode) {
+        debug_y4m_writer.close_file();
         std::ostringstream oss;
-        oss << "Debug frames saved: " << debug_sequence_dir << " (" << debug_sequence_idx << " frames). "
-            << "Convert using: ffmpeg -framerate "
-            << std::max(1, cfg.fps > 0 ? cfg.fps : cfg.send_rate_hz)
-            << " -i " << debug_sequence_dir << "/frame_%06d.jpg -c:v libx264 -pix_fmt yuv420p "
+        oss << "Debug Y4M saved: " << debug_y4m_path << ". "
+            << "Convert using: ffmpeg -i " << debug_y4m_path << " -c:v libx264 -pix_fmt yuv420p "
             << cfg.annotated_video_path;
         log_msg(LogLevel::Info, oss.str());
     }

@@ -88,6 +88,7 @@ Behavior:
 - All hard errors print explicit reason (`errno` + message where applicable).
 - CSV includes an `error` column for per-frame error state.
 - In debug mode, writes an annotated video with overlays (state, confidence, `dx/dy/z/yaw`, and target marker).
+- If tag is visible but `target=0` persists, lower `apriltag.min_confidence` (start with `0.25~0.35`) and keep `apriltag.confidence_full_area_ratio=0.02`.
 
 CLI overrides:
 - `--debug` force debug on
@@ -120,13 +121,13 @@ Run and stop with `Ctrl+C`:
 On clean stop, the app prints:
 - `Debug video saved: /tmp/vision_bridge_annotated.avi`
 
-If OpenCV `VideoWriter` is not available on your Buildroot image, the app now falls back automatically to:
-- `/tmp/vision_bridge_annotated.avi.frames/frame_000001.jpg`, ...
+If OpenCV `VideoWriter` is not available on your Buildroot image, the app now falls back automatically to a single raw video file:
+- `/tmp/vision_bridge_annotated.avi.y4m`
 
 Then convert on host:
 
 ```bash
-ffmpeg -framerate 30 -i /tmp/vision_bridge_annotated.avi.frames/frame_%06d.jpg -c:v libx264 -pix_fmt yuv420p /tmp/vision_bridge_annotated.avi
+ffmpeg -i /tmp/vision_bridge_annotated.avi.y4m -c:v libx264 -pix_fmt yuv420p /tmp/vision_bridge_annotated.avi
 ```
 
 Copy video to your laptop for inspection:
