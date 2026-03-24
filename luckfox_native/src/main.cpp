@@ -434,7 +434,7 @@ public:
         return true;
     }
 
-    bool read_gray(cv::Mat* gray, std::string* err) {
+    bool read_frame(cv::Mat* gray, cv::Mat* bgr, std::string* err) {
         if (fd_ < 0) {
             *err = "v4l2 not opened";
             return false;
@@ -472,7 +472,22 @@ public:
             return false;
         }
         cv::Mat y(height_, width_, CV_8UC1, bufs_[b.index].y);
-        y.copyTo(*gray);
+        if (gray) {
+            y.copyTo(*gray);
+        }
+
+        if (bgr) {
+            if (bufs_[b.index].uv && bufs_[b.index].uv_len >= static_cast<size_t>(width_ * height_ / 2)) {
+                cv::Mat nv12(height_ + height_ / 2, width_, CV_8UC1);
+                std::memcpy(nv12.data, bufs_[b.index].y, static_cast<size_t>(width_ * height_));
+                std::memcpy(nv12.data + (width_ * height_), bufs_[b.index].uv, static_cast<size_t>(width_ * height_ / 2));
+                cv::cvtColor(nv12, *bgr, cv::COLOR_YUV2BGR_NV12);
+            } else {
+                cv::Mat gray_preview;
+                y.convertTo(gray_preview, CV_8U, 255.0 / 219.0, -16.0 * 255.0 / 219.0);
+                cv::cvtColor(gray_preview, *bgr, cv::COLOR_GRAY2BGR);
+            }
+        }
 
         if (ioctl(fd_, VIDIOC_QBUF, &b) < 0) {
             *err = "VIDIOC_QBUF failed: " + std::string(std::strerror(errno));
@@ -548,29 +563,6 @@ std::optional<TargetSample> detect_apriltag_gray(const Config& cfg, const cv::Ma
     if (confidence < cfg.min_confidence) return std::nullopt;
     *last_seen_ms = now_ms();
     return TargetSample{now_ms(), dx, dy, z, yaw, confidence};
-}
-
-// NV12 Y plane on embedded ISPs is often limited-range (16..235).
-// Expand to full-range for debug visualization only.
-cv::Mat stretch_luma_for_debug(const cv::Mat& gray) {
-    cv::Mat expanded;
-    gray.convertTo(expanded, CV_8U, 255.0 / 219.0, -16.0 * 255.0 / 219.0);
-
-    // Improve local contrast in low-light scenes.
-    cv::Mat eq;
-    cv::equalizeHist(expanded, eq);
-
-    // Mild gamma lift to avoid dark-looking preview.
-    cv::Mat lut(1, 256, CV_8U);
-    const double gamma = 0.75;  // <1.0 brightens
-    for (int i = 0; i < 256; ++i) {
-        const double x = static_cast<double>(i) / 255.0;
-        const int y = static_cast<int>(std::pow(x, gamma) * 255.0 + 0.5);
-        lut.at<uint8_t>(i) = static_cast<uint8_t>(std::max(0, std::min(255, y)));
-    }
-    cv::Mat out;
-    cv::LUT(eq, lut, out);
-    return out;
 }
 
 std::string opencv_videoio_summary() {
@@ -783,8 +775,16 @@ void annotate_debug_frame(
 }
 
 bool try_open_debug_writer(const std::string& path, int fourcc, int fps, const cv::Size& size, cv::VideoWriter* out_writer) {
-    if (out_writer->open(path, cv::CAP_FFMPEG, fourcc, fps, size, true)) return true;
-    if (out_writer->open(path, cv::CAP_GSTREAMER, fourcc, fps, size, true)) return true;
+    const std::vector<int> preferred_fourcc = {
+        cv::VideoWriter::fourcc('a', 'v', 'c', '1'),
+        cv::VideoWriter::fourcc('H', '2', '6', '4'),
+        cv::VideoWriter::fourcc('m', 'p', '4', 'v'),
+        fourcc
+    };
+    for (int cc : preferred_fourcc) {
+        if (out_writer->open(path, cv::CAP_FFMPEG, cc, fps, size, true)) return true;
+        if (out_writer->open(path, cv::CAP_GSTREAMER, cc, fps, size, true)) return true;
+    }
     return false;
 }
 
@@ -978,14 +978,12 @@ int main(int argc, char** argv) {
             if (use_v4l2_fallback) {
                 cv::Mat gray;
                 std::string read_err;
-                if (!v4l2_fallback.read_gray(&gray, &read_err)) {
+                if (!v4l2_fallback.read_frame(&gray, &debug_frame, &read_err)) {
                     if (read_err == "interrupted" && g_stop) {
                         break;
                     }
                     frame_error = "v4l2_read_gray_failed: " + read_err;
                 } else {
-                    cv::Mat gray_preview = stretch_luma_for_debug(gray);
-                    cv::cvtColor(gray_preview, debug_frame, cv::COLOR_GRAY2BGR);
                     target = detect_apriltag_gray(cfg, gray, &last_seen_ms);
                 }
             } else {

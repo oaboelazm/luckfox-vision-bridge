@@ -108,9 +108,13 @@ Set debug video output path in config:
 ```json
 "logging": {
   "csv_path": "/tmp/vision_bridge_log.csv",
-  "annotated_video_path": "/tmp/vision_bridge_annotated.avi"
+  "annotated_video_path": "/root/vision_bridge_annotated.mp4"
 }
 ```
+
+Recommended for size/quality balance:
+- Use `.mp4` extension for annotated output (`mp4v/H264` path is tried first).
+- Write debug video under `/root` instead of `/tmp` to avoid tmpfs/OOM kills.
 
 Run and stop with `Ctrl+C`:
 

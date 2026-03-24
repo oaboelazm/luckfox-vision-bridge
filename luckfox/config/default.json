@@ -13,7 +13,7 @@
     "rtsp_url": "",
     "width": 640,
     "height": 480,
-    "fps": 30,
+    "fps": 15,
     "intrinsics": {
       "fx": 520.0,
       "fy": 520.0,
@@ -52,6 +52,6 @@
   },
   "logging": {
     "csv_path": "/tmp/vision_bridge_log.csv",
-    "annotated_video_path": "/tmp/vision_bridge_annotated.avi"
+    "annotated_video_path": "/root/vision_bridge_annotated.mp4"
   }
 }
