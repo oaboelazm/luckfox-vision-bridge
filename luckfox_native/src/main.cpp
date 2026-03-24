@@ -550,6 +550,14 @@ std::optional<TargetSample> detect_apriltag_gray(const Config& cfg, const cv::Ma
     return TargetSample{now_ms(), dx, dy, z, yaw, confidence};
 }
 
+// NV12 Y plane on embedded ISPs is often limited-range (16..235).
+// Expand to full-range for debug visualization only.
+cv::Mat stretch_luma_for_debug(const cv::Mat& gray) {
+    cv::Mat out;
+    gray.convertTo(out, CV_8U, 255.0 / 219.0, -16.0 * 255.0 / 219.0);
+    return out;
+}
+
 std::string opencv_videoio_summary() {
     std::istringstream in(cv::getBuildInformation());
     std::ostringstream out;
@@ -961,7 +969,8 @@ int main(int argc, char** argv) {
                     }
                     frame_error = "v4l2_read_gray_failed: " + read_err;
                 } else {
-                    cv::cvtColor(gray, debug_frame, cv::COLOR_GRAY2BGR);
+                    cv::Mat gray_preview = stretch_luma_for_debug(gray);
+                    cv::cvtColor(gray_preview, debug_frame, cv::COLOR_GRAY2BGR);
                     target = detect_apriltag_gray(cfg, gray, &last_seen_ms);
                 }
             } else {

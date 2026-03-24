@@ -216,6 +216,62 @@ Fix:
    - `core`, `imgproc`, `videoio`, `calib3d`, `aruco`
 2. Rebuild `luckfox_bridge` with that SDK toolchain.
 
+### Runtime loader error: `can't load library 'libopencv_*.so.406'` (or `libav*.so`)
+
+Cause:
+- Binary was linked against shared libs that are not present on the target rootfs.
+- Typical missing groups: OpenCV (`libopencv_*`) and FFmpeg (`libavcodec`, `libavformat`, `libavutil`, `libswscale`, `libswresample`).
+
+Recommended fix for this Luckfox setup:
+- Keep libraries in `addons/lib` inside repo as a transfer bundle.
+- Push them directly from build machine to target `/lib` on Luckfox.
+
+On build machine:
+
+```bash
+# 1) Collect direct + transitive dependencies
+mkdir -p addons/lib
+arm-rockchip830-linux-uclibcgnueabihf-readelf -d luckfox_native/build-armv7/luckfox_bridge | grep NEEDED
+
+# 2) Copy required libs from Buildroot staging/sysroot into addons/lib
+# Adjust STAGING_DIR/SYSROOT paths to your SDK.
+cp -av "$STAGING_DIR/usr/lib/libopencv_"*.so* addons/lib/ 2>/dev/null || true
+cp -av "$STAGING_DIR/usr/lib/libavcodec.so"* addons/lib/ 2>/dev/null || true
+cp -av "$STAGING_DIR/usr/lib/libavformat.so"* addons/lib/ 2>/dev/null || true
+cp -av "$STAGING_DIR/usr/lib/libavutil.so"* addons/lib/ 2>/dev/null || true
+cp -av "$STAGING_DIR/usr/lib/libswscale.so"* addons/lib/ 2>/dev/null || true
+cp -av "$STAGING_DIR/usr/lib/libswresample.so"* addons/lib/ 2>/dev/null || true
+```
+
+Deploy to board directly from build machine:
+
+```bash
+# Copy shared libs directly to target runtime path
+scp addons/lib/* root@<luckfox-ip>:/lib/
+
+# Copy runtime binary
+scp luckfox_native/build-armv7/luckfox_bridge root@<luckfox-ip>:/root/luckfox_bridge
+```
+
+Run on Luckfox:
+
+```sh
+chmod +x /root/luckfox_bridge
+/root/luckfox_bridge --config /root/luckfox/config/default.json --mode apriltag --no-uart --debug
+```
+
+Alternative (if you cannot write `/lib`, temporary only):
+
+```sh
+LD_LIBRARY_PATH=/root/addons/lib:$LD_LIBRARY_PATH /root/luckfox_bridge --config /root/luckfox/config/default.json --mode apriltag --no-uart --debug
+```
+
+Notes:
+- Your confirmed working path is `/lib`; use that as primary on this board.
+- Keep a backup before overwriting existing system libs if versions differ.
+- If the board still reports a missing `.so`, copy that exact library from the same SDK/staging used for build.
+- Keep ABI consistent: target libs must come from the same toolchain/rootfs generation used to compile the binary.
+
 ### `mode=disabled` prints: `open(/dev/ttyS1) failed: No such file or directory`
 
 Cause:
