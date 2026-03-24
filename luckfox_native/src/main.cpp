@@ -553,8 +553,23 @@ std::optional<TargetSample> detect_apriltag_gray(const Config& cfg, const cv::Ma
 // NV12 Y plane on embedded ISPs is often limited-range (16..235).
 // Expand to full-range for debug visualization only.
 cv::Mat stretch_luma_for_debug(const cv::Mat& gray) {
+    cv::Mat expanded;
+    gray.convertTo(expanded, CV_8U, 255.0 / 219.0, -16.0 * 255.0 / 219.0);
+
+    // Improve local contrast in low-light scenes.
+    cv::Mat eq;
+    cv::equalizeHist(expanded, eq);
+
+    // Mild gamma lift to avoid dark-looking preview.
+    cv::Mat lut(1, 256, CV_8U);
+    const double gamma = 0.75;  // <1.0 brightens
+    for (int i = 0; i < 256; ++i) {
+        const double x = static_cast<double>(i) / 255.0;
+        const int y = static_cast<int>(std::pow(x, gamma) * 255.0 + 0.5);
+        lut.at<uint8_t>(i) = static_cast<uint8_t>(std::max(0, std::min(255, y)));
+    }
     cv::Mat out;
-    gray.convertTo(out, CV_8U, 255.0 / 219.0, -16.0 * 255.0 / 219.0);
+    cv::LUT(eq, lut, out);
     return out;
 }
 

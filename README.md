@@ -262,6 +262,10 @@ chmod +x /root/luckfox_bridge
 
 Alternative (if you cannot write `/lib`, temporary only):
 
+```bash
+scp -r addons/lib root@<luckfox-ip>:/root/addons/
+```
+
 ```sh
 LD_LIBRARY_PATH=/root/addons/lib:$LD_LIBRARY_PATH /root/luckfox_bridge --config /root/luckfox/config/default.json --mode apriltag --no-uart --debug
 ```
