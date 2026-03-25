@@ -1096,28 +1096,44 @@ int main(int argc, char** argv) {
     PlantRknnDetector plant_detector;
 #endif
     if (cfg.mode == RuntimeMode::AprilTag || cfg.mode == RuntimeMode::Plant) {
-        if (cfg.debug_enabled) {
-            const std::string summary = opencv_videoio_summary();
-            if (!summary.empty()) {
-                log_msg(LogLevel::Debug, summary);
+        const std::string fallback_node = cfg.cam_device_path.empty() ? ("/dev/video" + std::to_string(cfg.cam_device)) : cfg.cam_device_path;
+
+        if (cfg.mode == RuntimeMode::Plant) {
+            // Keep plant mode memory footprint low: skip OpenCV backend probing and go direct V4L2.
+            if (cfg.debug_enabled) {
+                log_msg(LogLevel::Debug, "Plant mode uses direct V4L2 camera path.");
+                log_msg(LogLevel::Debug, "POSIX probe: " + posix_probe_camera_node(fallback_node));
             }
-            const std::string node_to_probe = cfg.cam_device_path.empty() ? ("/dev/video" + std::to_string(cfg.cam_device)) : cfg.cam_device_path;
-            log_msg(LogLevel::Debug, "POSIX probe: " + posix_probe_camera_node(node_to_probe));
-        }
-        std::string cam_diag;
-        if (!open_camera_with_diagnostics(cfg, &cap, &cam_diag)) {
-            log_msg(LogLevel::Error, "OpenCV camera open failed. " + cam_diag);
-            const std::string fallback_node = cfg.cam_device_path.empty() ? ("/dev/video" + std::to_string(cfg.cam_device)) : cfg.cam_device_path;
             std::string v4l2_err;
             if (!v4l2_fallback.open_dev(fallback_node, cfg.width, cfg.height, cfg.fps, &v4l2_err)) {
-                log_msg(LogLevel::Error, "V4L2 direct fallback failed on " + fallback_node + ": " + v4l2_err);
+                log_msg(LogLevel::Error, "V4L2 direct camera open failed on " + fallback_node + ": " + v4l2_err);
                 log_msg(LogLevel::Error, "Set camera.device_path to an ISP node (often /dev/video11) and ensure no process owns the camera.");
                 return 3;
             }
             use_v4l2_fallback = true;
-            log_msg(LogLevel::Info, "Camera opened via V4L2 direct fallback on " + fallback_node);
+            log_msg(LogLevel::Info, "Camera opened via V4L2 direct path on " + fallback_node);
         } else {
-            log_msg(LogLevel::Info, "Camera opened successfully.");
+            if (cfg.debug_enabled) {
+                const std::string summary = opencv_videoio_summary();
+                if (!summary.empty()) {
+                    log_msg(LogLevel::Debug, summary);
+                }
+                log_msg(LogLevel::Debug, "POSIX probe: " + posix_probe_camera_node(fallback_node));
+            }
+            std::string cam_diag;
+            if (!open_camera_with_diagnostics(cfg, &cap, &cam_diag)) {
+                log_msg(LogLevel::Error, "OpenCV camera open failed. " + cam_diag);
+                std::string v4l2_err;
+                if (!v4l2_fallback.open_dev(fallback_node, cfg.width, cfg.height, cfg.fps, &v4l2_err)) {
+                    log_msg(LogLevel::Error, "V4L2 direct fallback failed on " + fallback_node + ": " + v4l2_err);
+                    log_msg(LogLevel::Error, "Set camera.device_path to an ISP node (often /dev/video11) and ensure no process owns the camera.");
+                    return 3;
+                }
+                use_v4l2_fallback = true;
+                log_msg(LogLevel::Info, "Camera opened via V4L2 direct fallback on " + fallback_node);
+            } else {
+                log_msg(LogLevel::Info, "Camera opened successfully.");
+            }
         }
     }
 #if defined(LVB_HAVE_RKNN)
@@ -1126,6 +1142,7 @@ int main(int argc, char** argv) {
             log_msg(LogLevel::Error, "Plant mode selected but plant.enabled=false in config.");
             return 3;
         }
+        log_msg(LogLevel::Info, "Initializing RKNN runtime...");
         std::string rknn_err;
         if (!plant_detector.init(cfg, &rknn_err)) {
             log_msg(LogLevel::Error, "RKNN init failed: " + rknn_err);

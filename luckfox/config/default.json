@@ -7,9 +7,9 @@
     "enabled": false,
     "status_every_n": 30
   },
-  "camera": {
+"camera": {
     "device": 0,
-    "device_path": "",
+    "device_path": "/dev/video11",
     "rtsp_url": "",
     "width": 640,
     "height": 480,
@@ -31,7 +31,7 @@
   },
   "plant": {
     "enabled": false,
-    "model_path": "/root/models/model_rv1103.rknn",
+    "model_path": "/root/models/model.rknn",
     "input_size": 640,
     "min_confidence": 0.45,
     "target_class_id": -1,
@@ -52,7 +52,7 @@
     "max_abs_offset_for_hold": 0.12
   },
   "logging": {
-    "csv_path": "/tmp/vision_bridge_log.csv",
-    "annotated_video_path": "/root/vision_bridge_annotated.mp4"
+    "csv_path": "/root/t/vision_bridge_log.csv",
+    "annotated_video_path": "/root/t/vision_bridge_annotated.mp4"
   }
 }
