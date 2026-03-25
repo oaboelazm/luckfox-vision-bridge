@@ -31,10 +31,11 @@
   },
   "plant": {
     "enabled": false,
-    "model_path": "/root/models/plant_detector.rknn",
-    "input_size": 320,
-    "min_confidence": 0.60,
-    "target_class_id": 0
+    "model_path": "/root/models/model_rv1103.rknn",
+    "input_size": 640,
+    "min_confidence": 0.45,
+    "target_class_id": -1,
+    "rgb_input": true
   },
   "uart": {
     "enabled": true,

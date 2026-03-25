@@ -26,7 +26,8 @@ Expected: ARM ELF, not `x86-64`.
 
 ## Current Scope
 
-- AprilTag-only targeting (no plant model yet)
+- Phase 1: AprilTag targeting (native C++)
+- Phase 2: native RKNN plant mode in the same runtime binary
 - Continuous guidance packets Luckfox -> ESP32
 - Continuous status packets ESP32 -> Luckfox
 - Mission state machine: `SEARCH -> TRACK -> APPROACH -> HOLD`
@@ -64,7 +65,23 @@ Configured in `luckfox/config/default.json`:
 
 Supported now:
 - `apriltag`: vision + guidance (requires OpenCV build with ArUco/AprilTag modules)
+- `plant`: RKNN inference + guidance (requires RKNN runtime library and headers at build time)
 - `disabled`: no detection, still runs control loop skeleton
+
+Plant mode config keys:
+
+```json
+"plant": {
+  "enabled": true,
+  "model_path": "/root/models/model_rv1103.rknn",
+  "input_size": 640,
+  "min_confidence": 0.45,
+  "target_class_id": -1,
+  "rgb_input": true
+}
+```
+
+`target_class_id=-1` means accept any class and choose highest-confidence candidate.
 
 CLI override:
 
@@ -470,15 +487,42 @@ chmod +x /root/luckfox_bridge
 
 The updated binary prints a `Build: <date time>` line at startup; use it to verify you are running the latest build.
 
-## Why RKNN Is Not Used Yet
+## RKNN Phase 2 (Native, Same Binary)
 
-Current implementation is **AprilTag-only MVP**. AprilTag is classical marker detection and does not require NPU/RKNN.
+Current runtime on board is **native C++** (`luckfox_native/build/luckfox_bridge`) using the same build flow as AprilTag.
 
-RKNN is intended for **plant/object neural detection** (Phase 2), which requires:
-1. Dataset collection + labeling
-2. Model training (YOLO-n class)
-3. ONNX -> RKNN conversion + quantization
-4. Runtime integration and arbitration with AprilTag
+RKNN build note (only additional difference vs AprilTag build):
+- Keep using the same build command and toolchain flow.
+- For `--mode plant`, ensure your SDK/staging exposes:
+  - `rknn_api.h`
+  - `librknnmrt.so`
+- If RKNN headers/libs are missing, binary still builds, but plant mode is disabled at runtime with a clear error.
+
+Phase 2 runs in the same native binary (`luckfox_bridge`) using `--mode plant` (or `runtime.mode=plant` in config).
+
+Runtime behavior in plant mode:
+- camera capture path is identical to AprilTag mode
+- RKNN model loads from `plant.model_path`
+- output decode expects YOLO-like tensor layout from your export (`[1, 10, 8400]`)
+- guidance packet uses `target_type=2` for plant
+- debug annotated video includes bbox + object center + mission state telemetry
+
+## RKNN Model Folder Review
+
+`RKNN_Model/` is valid as a conversion pipeline and contains all required phases:
+1. `pt_to_onnx.py`
+2. `check_onnx_io.py`
+3. `generate_dataset_txt.py`
+4. `onnx_or_tflite_to_rknn.py`
+5. `run_pipeline.sh`
+
+Your quantization with 80 images is usable for first deployment.  
+For better stability across lighting conditions, increase calibration set to 150-300 real camera-domain images when possible.
+
+Model review notes from your current output:
+- `RKNN_Model/output/model_rv1103.rknn` exists and size looks valid.
+- ONNX output shape was reported as `[1, 10, 8400]`, i.e. `4 box + 6 class` channels for YOLO-like decode.
+- Native postprocess in `luckfox_bridge` is aligned to this layout.
 
 ## Run (manual)
 
@@ -492,6 +536,18 @@ Dry run without ESP32:
 
 ```bash
 ./luckfox_native/build-armv7/luckfox_bridge --config luckfox/config/default.json --mode apriltag --no-uart
+```
+
+RKNN plant mode:
+
+```bash
+./luckfox_native/build-armv7/luckfox_bridge --config luckfox/config/default.json --mode plant
+```
+
+RKNN plant dry run without ESP32:
+
+```bash
+./luckfox_native/build-armv7/luckfox_bridge --config luckfox/config/default.json --mode plant --no-uart --debug
 ```
 
 ## Validate Quickly

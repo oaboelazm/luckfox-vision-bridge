@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <sstream>
 #include <string>
+#include <algorithm>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/select.h>
@@ -18,6 +19,7 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <memory>
 #include <linux/videodev2.h>
 
 #if defined(LVB_HAVE_OPENCV)
@@ -28,6 +30,10 @@
 #include <opencv2/videoio.hpp>
 #endif
 
+#if defined(LVB_HAVE_RKNN)
+#include <rknn_api.h>
+#endif
+
 namespace {
 
 constexpr uint16_t kGuidanceHeader = 0xAA55;
@@ -35,7 +41,7 @@ constexpr uint16_t kStatusHeader = 0x55AA;
 constexpr uint8_t kGuidanceType = 0x01;
 constexpr uint8_t kStatusType = 0x81;
 
-enum class RuntimeMode { Disabled, AprilTag };
+enum class RuntimeMode { Disabled, AprilTag, Plant };
 enum class MissionState { Search = 0, Track = 1, Approach = 2, Hold = 3 };
 enum class LogLevel { Error = 0, Info = 1, Debug = 2 };
 
@@ -81,6 +87,12 @@ struct Config {
     float min_confidence{0.65f};
     float confidence_full_area_ratio{0.02f};
     int lost_timeout_ms{300};
+    bool plant_enabled{false};
+    std::string plant_model_path{"/root/models/plant_detector.rknn"};
+    int plant_input_size{320};
+    float plant_min_confidence{0.60f};
+    int plant_target_class_id{-1};
+    bool plant_rgb_input{true};
     bool uart_enabled{true};
     std::string uart_port{"/dev/ttyS1"};
     int uart_baud{921600};
@@ -132,6 +144,7 @@ int64_t now_ms() {
 
 RuntimeMode parse_mode(const std::string& mode) {
     if (mode == "apriltag") return RuntimeMode::AprilTag;
+    if (mode == "plant") return RuntimeMode::Plant;
     return RuntimeMode::Disabled;
 }
 
@@ -169,6 +182,7 @@ bool load_config(const std::string& path, Config* cfg) {
     bool dbg = false;
     if (regex_bool(raw, R"re("debug"\s*:\s*\{[\s\S]*?"enabled"\s*:\s*(true|false))re", &dbg)) cfg->debug_enabled = dbg;
     double n = 0;
+    std::string s;
     if (regex_num(raw, R"re("debug"\s*:\s*\{[\s\S]*?"status_every_n"\s*:\s*([-0-9.]+))re", &n)) cfg->debug_status_every_n = static_cast<int>(n);
 
     if (regex_num(raw, R"re("device"\s*:\s*([-0-9.]+))re", &n)) cfg->cam_device = static_cast<int>(n);
@@ -185,6 +199,14 @@ bool load_config(const std::string& path, Config* cfg) {
     if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"min_confidence"\s*:\s*([-0-9.]+))re", &n)) cfg->min_confidence = static_cast<float>(n);
     if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"confidence_full_area_ratio"\s*:\s*([-0-9.]+))re", &n)) cfg->confidence_full_area_ratio = static_cast<float>(n);
     if (regex_num(raw, R"re("apriltag"\s*:\s*\{[\s\S]*?"lost_timeout_ms"\s*:\s*([-0-9.]+))re", &n)) cfg->lost_timeout_ms = static_cast<int>(n);
+    bool plant_enabled = false;
+    if (regex_bool(raw, R"re("plant"\s*:\s*\{[\s\S]*?"enabled"\s*:\s*(true|false))re", &plant_enabled)) cfg->plant_enabled = plant_enabled;
+    if (regex_str(raw, R"re("plant"\s*:\s*\{[\s\S]*?"model_path"\s*:\s*"([^"]+)")re", &s)) cfg->plant_model_path = s;
+    if (regex_num(raw, R"re("plant"\s*:\s*\{[\s\S]*?"input_size"\s*:\s*([-0-9.]+))re", &n)) cfg->plant_input_size = static_cast<int>(n);
+    if (regex_num(raw, R"re("plant"\s*:\s*\{[\s\S]*?"min_confidence"\s*:\s*([-0-9.]+))re", &n)) cfg->plant_min_confidence = static_cast<float>(n);
+    if (regex_num(raw, R"re("plant"\s*:\s*\{[\s\S]*?"target_class_id"\s*:\s*([-0-9.]+))re", &n)) cfg->plant_target_class_id = static_cast<int>(n);
+    bool plant_rgb_input = true;
+    if (regex_bool(raw, R"re("plant"\s*:\s*\{[\s\S]*?"rgb_input"\s*:\s*(true|false))re", &plant_rgb_input)) cfg->plant_rgb_input = plant_rgb_input;
     bool uart_enabled = true;
     if (regex_bool(raw, R"re("uart"\s*:\s*\{[\s\S]*?"enabled"\s*:\s*(true|false))re", &uart_enabled)) cfg->uart_enabled = uart_enabled;
     if (regex_num(raw, R"re("baud"\s*:\s*([-0-9.]+))re", &n)) cfg->uart_baud = static_cast<int>(n);
@@ -195,7 +217,6 @@ bool load_config(const std::string& path, Config* cfg) {
     if (regex_num(raw, R"re("hold_z_m"\s*:\s*([-0-9.]+))re", &n)) cfg->hold_z_m = static_cast<float>(n);
     if (regex_num(raw, R"re("max_abs_offset_for_hold"\s*:\s*([-0-9.]+))re", &n)) cfg->max_abs_offset_for_hold = static_cast<float>(n);
 
-    std::string s;
     if (regex_str(raw, R"re("port"\s*:\s*"([^"]+)")re", &s)) cfg->uart_port = s;
     if (regex_str(raw, R"re("csv_path"\s*:\s*"([^"]+)")re", &s)) cfg->csv_path = s;
     if (regex_str(raw, R"re("annotated_video_path"\s*:\s*"([^"]+)")re", &s)) cfg->annotated_video_path = s;
@@ -732,12 +753,156 @@ std::optional<TargetSample> detect_apriltag(const Config& cfg, cv::VideoCapture*
     return TargetSample{now_ms(), dx, dy, z, yaw, confidence};
 }
 
+#if defined(LVB_HAVE_RKNN)
+class PlantRknnDetector {
+public:
+    bool init(const Config& cfg, std::string* err) {
+        destroy();
+        std::ifstream f(cfg.plant_model_path, std::ios::binary);
+        if (!f.is_open()) {
+            *err = "failed to open RKNN model: " + cfg.plant_model_path;
+            return false;
+        }
+        std::vector<unsigned char> model((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (model.empty()) {
+            *err = "RKNN model file is empty: " + cfg.plant_model_path;
+            return false;
+        }
+        if (rknn_init(&ctx_, model.data(), model.size(), 0, nullptr) != RKNN_SUCC) {
+            *err = "rknn_init failed for model: " + cfg.plant_model_path;
+            ctx_ = 0;
+            return false;
+        }
+
+        rknn_input_output_num io_num{};
+        if (rknn_query(ctx_, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num)) != RKNN_SUCC) {
+            *err = "rknn_query(RKNN_QUERY_IN_OUT_NUM) failed";
+            destroy();
+            return false;
+        }
+        n_input_ = io_num.n_input;
+        n_output_ = io_num.n_output;
+        if (n_input_ < 1 || n_output_ < 1) {
+            *err = "invalid RKNN io count";
+            destroy();
+            return false;
+        }
+        return true;
+    }
+
+    std::optional<std::pair<TargetSample, cv::Rect>> infer(const Config& cfg, const cv::Mat& frame_bgr) {
+        if (!ctx_) return std::nullopt;
+        if (frame_bgr.empty()) return std::nullopt;
+
+        cv::Mat resized;
+        cv::resize(frame_bgr, resized, cv::Size(cfg.plant_input_size, cfg.plant_input_size), 0, 0, cv::INTER_LINEAR);
+        if (cfg.plant_rgb_input) {
+            cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
+        }
+
+        rknn_input input{};
+        input.index = 0;
+        input.type = RKNN_TENSOR_UINT8;
+        input.fmt = RKNN_TENSOR_NHWC;
+        input.size = static_cast<uint32_t>(resized.total() * resized.elemSize());
+        input.buf = resized.data;
+        input.pass_through = 0;
+        if (rknn_inputs_set(ctx_, 1, &input) != RKNN_SUCC) return std::nullopt;
+        if (rknn_run(ctx_, nullptr) != RKNN_SUCC) return std::nullopt;
+
+        std::vector<rknn_output> outputs(n_output_);
+        for (auto& o : outputs) o.want_float = 1;
+        if (rknn_outputs_get(ctx_, n_output_, outputs.data(), nullptr) != RKNN_SUCC) return std::nullopt;
+
+        auto release_outputs = [&]() { rknn_outputs_release(ctx_, n_output_, outputs.data()); };
+        if (n_output_ < 1 || outputs[0].buf == nullptr || outputs[0].size == 0) {
+            release_outputs();
+            return std::nullopt;
+        }
+
+        const float* out = reinterpret_cast<const float*>(outputs[0].buf);
+        const size_t n_float = outputs[0].size / sizeof(float);
+        if (n_float < 10) {
+            release_outputs();
+            return std::nullopt;
+        }
+
+        const int channels = 10;
+        const int n_pred = static_cast<int>(n_float / channels);
+        if (n_pred <= 0) {
+            release_outputs();
+            return std::nullopt;
+        }
+
+        int best_i = -1;
+        float best_score = -1.0f;
+        for (int i = 0; i < n_pred; ++i) {
+            const float* p = out + i * channels;
+            float cls_score = -1.0f;
+            int cls_id = -1;
+            for (int c = 4; c < channels; ++c) {
+                if (p[c] > cls_score) {
+                    cls_score = p[c];
+                    cls_id = c - 4;
+                }
+            }
+            if (cfg.plant_target_class_id >= 0 && cls_id != cfg.plant_target_class_id) continue;
+            if (cls_score >= cfg.plant_min_confidence && cls_score > best_score) {
+                best_score = cls_score;
+                best_i = i;
+            }
+        }
+
+        if (best_i < 0) {
+            release_outputs();
+            return std::nullopt;
+        }
+
+        const float* p = out + best_i * channels;
+        float cx = p[0], cy = p[1], bw = p[2], bh = p[3];
+        float sx = static_cast<float>(frame_bgr.cols) / static_cast<float>(cfg.plant_input_size);
+        float sy = static_cast<float>(frame_bgr.rows) / static_cast<float>(cfg.plant_input_size);
+        cx *= sx; cy *= sy; bw *= sx; bh *= sy;
+
+        int x1 = static_cast<int>(std::max(0.0f, cx - 0.5f * bw));
+        int y1 = static_cast<int>(std::max(0.0f, cy - 0.5f * bh));
+        int x2 = static_cast<int>(std::min(static_cast<float>(frame_bgr.cols - 1), cx + 0.5f * bw));
+        int y2 = static_cast<int>(std::min(static_cast<float>(frame_bgr.rows - 1), cy + 0.5f * bh));
+        int rw = std::max(1, x2 - x1);
+        int rh = std::max(1, y2 - y1);
+        float area = static_cast<float>(rw * rh);
+
+        float dx = (cx - cfg.width * 0.5f) / (cfg.width * 0.5f);
+        float dy = (cy - cfg.height * 0.5f) / (cfg.height * 0.5f);
+        float z = std::max(0.25f, std::min(10.0f, 25000.0f / std::max(1.0f, area)));
+        TargetSample t{now_ms(), dx, dy, z, 0.0f, best_score};
+        cv::Rect box(x1, y1, rw, rh);
+        release_outputs();
+        return std::make_optional(std::make_pair(t, box));
+    }
+
+    void destroy() {
+        if (ctx_) {
+            rknn_destroy(ctx_);
+            ctx_ = 0;
+        }
+    }
+    ~PlantRknnDetector() { destroy(); }
+
+private:
+    rknn_context ctx_{0};
+    uint32_t n_input_{0};
+    uint32_t n_output_{0};
+};
+#endif
+
 void annotate_debug_frame(
     cv::Mat* frame,
     uint16_t seq,
     MissionState state,
     const std::optional<TargetSample>& target,
-    const std::string& frame_error
+    const std::string& frame_error,
+    const cv::Rect* target_box = nullptr
 ) {
     if (frame == nullptr || frame->empty()) return;
 
@@ -760,6 +925,9 @@ void annotate_debug_frame(
         cv::circle(*frame, cv::Point(px, py), 10, cv::Scalar(0, 255, 0), 2);
         cv::line(*frame, cv::Point(px - 14, py), cv::Point(px + 14, py), cv::Scalar(0, 255, 0), 2);
         cv::line(*frame, cv::Point(px, py - 14), cv::Point(px, py + 14), cv::Scalar(0, 255, 0), 2);
+        if (target_box != nullptr && target_box->width > 0 && target_box->height > 0) {
+            cv::rectangle(*frame, *target_box, cv::Scalar(0, 255, 0), 2);
+        }
 
         std::ostringstream l2;
         l2 << "target=1 conf=" << t.confidence << " dx=" << t.dx_norm << " dy=" << t.dy_norm
@@ -855,7 +1023,7 @@ private:
 #endif
 
 void usage() {
-    std::cout << "Usage: luckfox_bridge --config <path> [--mode apriltag|disabled] [--debug] [--quiet] [--no-uart]\n";
+    std::cout << "Usage: luckfox_bridge --config <path> [--mode apriltag|plant|disabled] [--debug] [--quiet] [--no-uart]\n";
 }
 
 }  // namespace
@@ -889,12 +1057,26 @@ int main(int argc, char** argv) {
     install_signal_handlers();
 
     log_msg(LogLevel::Info, std::string("Build: ") + __DATE__ + " " + __TIME__);
-    log_msg(LogLevel::Info, "Starting luckfox_bridge mode=" + std::string(cfg.mode == RuntimeMode::AprilTag ? "apriltag" : "disabled"));
+    std::string mode_name = "disabled";
+    if (cfg.mode == RuntimeMode::AprilTag) mode_name = "apriltag";
+    if (cfg.mode == RuntimeMode::Plant) mode_name = "plant";
+    log_msg(LogLevel::Info, "Starting luckfox_bridge mode=" + mode_name);
     log_msg(LogLevel::Info, "Camera config: device=" + std::to_string(cfg.cam_device) + " device_path=" + (cfg.cam_device_path.empty() ? "<empty>" : cfg.cam_device_path));
 
 #if !defined(LVB_HAVE_OPENCV)
     if (cfg.mode == RuntimeMode::AprilTag) {
         log_msg(LogLevel::Error, "Binary built without OpenCV. AprilTag mode is unavailable. Rebuild with OpenCV or use mode=disabled.");
+        return 2;
+    }
+    if (cfg.mode == RuntimeMode::Plant) {
+        log_msg(LogLevel::Error, "Binary built without OpenCV. Plant mode camera path is unavailable.");
+        return 2;
+    }
+#endif
+
+#if !defined(LVB_HAVE_RKNN)
+    if (cfg.mode == RuntimeMode::Plant) {
+        log_msg(LogLevel::Error, "Binary built without RKNN runtime support. Rebuild with RKNN libraries available or use mode=apriltag/disabled.");
         return 2;
     }
 #endif
@@ -909,7 +1091,11 @@ int main(int argc, char** argv) {
     bool debug_y4m_mode = false;
     bool debug_output_error_reported = false;
     std::string debug_y4m_path;
-    if (cfg.mode == RuntimeMode::AprilTag) {
+    cv::Rect plant_box{};
+#if defined(LVB_HAVE_RKNN)
+    PlantRknnDetector plant_detector;
+#endif
+    if (cfg.mode == RuntimeMode::AprilTag || cfg.mode == RuntimeMode::Plant) {
         if (cfg.debug_enabled) {
             const std::string summary = opencv_videoio_summary();
             if (!summary.empty()) {
@@ -934,6 +1120,20 @@ int main(int argc, char** argv) {
             log_msg(LogLevel::Info, "Camera opened successfully.");
         }
     }
+#if defined(LVB_HAVE_RKNN)
+    if (cfg.mode == RuntimeMode::Plant) {
+        if (!cfg.plant_enabled) {
+            log_msg(LogLevel::Error, "Plant mode selected but plant.enabled=false in config.");
+            return 3;
+        }
+        std::string rknn_err;
+        if (!plant_detector.init(cfg, &rknn_err)) {
+            log_msg(LogLevel::Error, "RKNN init failed: " + rknn_err);
+            return 3;
+        }
+        log_msg(LogLevel::Info, "RKNN model loaded: " + cfg.plant_model_path);
+    }
+#endif
 #endif
 
     Uart uart;
@@ -992,6 +1192,37 @@ int main(int argc, char** argv) {
 #else
             frame_error = "apriltag_unavailable_no_opencv";
 #endif
+        } else if (cfg.mode == RuntimeMode::Plant) {
+#if defined(LVB_HAVE_OPENCV) && defined(LVB_HAVE_RKNN)
+            cv::Mat frame_bgr;
+            if (use_v4l2_fallback) {
+                cv::Mat gray;
+                std::string read_err;
+                if (!v4l2_fallback.read_frame(&gray, &frame_bgr, &read_err)) {
+                    if (read_err == "interrupted" && g_stop) {
+                        break;
+                    }
+                    frame_error = "v4l2_read_frame_failed: " + read_err;
+                }
+            } else {
+                if (!cap.read(frame_bgr) || frame_bgr.empty()) {
+                    frame_error = "opencv_read_frame_failed";
+                }
+            }
+
+            if (!frame_bgr.empty()) {
+                debug_frame = frame_bgr;
+                auto det = plant_detector.infer(cfg, frame_bgr);
+                if (det.has_value()) {
+                    target = det->first;
+                    plant_box = det->second;
+                } else {
+                    plant_box = cv::Rect();
+                }
+            }
+#else
+            frame_error = "plant_unavailable_no_opencv_or_rknn";
+#endif
         }
 
         bool emergency_hover = false;
@@ -999,7 +1230,7 @@ int main(int argc, char** argv) {
 
         GuidanceFrame frame{};
         frame.timestamp_ms = static_cast<uint32_t>(now_ms() & 0xFFFFFFFF);
-        frame.target_type = target.has_value() ? 1 : 0;
+        frame.target_type = target.has_value() ? (cfg.mode == RuntimeMode::Plant ? 2 : 1) : 0;
         frame.dx_norm = target.has_value() ? target->dx_norm : 0.0f;
         frame.dy_norm = target.has_value() ? target->dy_norm : 0.0f;
         frame.z_est_m = target.has_value() ? target->z_est_m : 99.0f;
@@ -1047,7 +1278,8 @@ int main(int argc, char** argv) {
 
 #if defined(LVB_HAVE_OPENCV)
         if (cfg.debug_enabled && !debug_frame.empty()) {
-            annotate_debug_frame(&debug_frame, seq, state, target, frame_error);
+            const cv::Rect* box_ptr = (cfg.mode == RuntimeMode::Plant && target.has_value()) ? &plant_box : nullptr;
+            annotate_debug_frame(&debug_frame, seq, state, target, frame_error, box_ptr);
             if (!debug_writer_opened && !debug_y4m_mode) {
                 const int fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
                 int out_fps = std::max(1, cfg.fps > 0 ? cfg.fps : cfg.send_rate_hz);
