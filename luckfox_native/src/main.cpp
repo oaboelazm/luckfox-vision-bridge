@@ -1098,6 +1098,23 @@ int main(int argc, char** argv) {
 #if defined(LVB_HAVE_RKNN)
     PlantRknnDetector plant_detector;
 #endif
+
+#if defined(LVB_HAVE_RKNN)
+    if (cfg.mode == RuntimeMode::Plant) {
+        if (!cfg.plant_enabled) {
+            log_msg(LogLevel::Error, "Plant mode selected but plant.enabled=false in config.");
+            return 3;
+        }
+        log_msg(LogLevel::Info, "Initializing RKNN runtime...");
+        std::string rknn_err;
+        if (!plant_detector.init(cfg, &rknn_err)) {
+            log_msg(LogLevel::Error, "RKNN init failed: " + rknn_err);
+            return 3;
+        }
+        log_msg(LogLevel::Info, "RKNN model loaded: " + cfg.plant_model_path);
+    }
+#endif
+
     if (cfg.mode == RuntimeMode::AprilTag || cfg.mode == RuntimeMode::Plant) {
         const std::string fallback_node = cfg.cam_device_path.empty() ? ("/dev/video" + std::to_string(cfg.cam_device)) : cfg.cam_device_path;
 
@@ -1140,21 +1157,6 @@ int main(int argc, char** argv) {
             }
         }
     }
-#if defined(LVB_HAVE_RKNN)
-    if (cfg.mode == RuntimeMode::Plant) {
-        if (!cfg.plant_enabled) {
-            log_msg(LogLevel::Error, "Plant mode selected but plant.enabled=false in config.");
-            return 3;
-        }
-        log_msg(LogLevel::Info, "Initializing RKNN runtime...");
-        std::string rknn_err;
-        if (!plant_detector.init(cfg, &rknn_err)) {
-            log_msg(LogLevel::Error, "RKNN init failed: " + rknn_err);
-            return 3;
-        }
-        log_msg(LogLevel::Info, "RKNN model loaded: " + cfg.plant_model_path);
-    }
-#endif
 #endif
 
     Uart uart;
