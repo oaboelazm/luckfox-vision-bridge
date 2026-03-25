@@ -366,7 +366,7 @@ class V4L2GrayCapture {
 public:
     ~V4L2GrayCapture() { close_dev(); }
 
-    bool open_dev(const std::string& path, int width, int height, int fps, std::string* err) {
+    bool open_dev(const std::string& path, int width, int height, int fps, int buffer_count, std::string* err) {
         close_dev();
         fd_ = ::open(path.c_str(), O_RDWR);
         if (fd_ < 0) {
@@ -396,7 +396,7 @@ public:
         ioctl(fd_, VIDIOC_S_PARM, &parm);
 
         v4l2_requestbuffers req{};
-        req.count = 4;
+        req.count = static_cast<uint32_t>(std::max(2, buffer_count));
         req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         req.memory = V4L2_MEMORY_MMAP;
         if (ioctl(fd_, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
@@ -516,6 +516,9 @@ public:
         }
         return true;
     }
+
+    int width() const { return width_; }
+    int height() const { return height_; }
 
 private:
     void close_dev() {
@@ -1105,13 +1108,14 @@ int main(int argc, char** argv) {
                 log_msg(LogLevel::Debug, "POSIX probe: " + posix_probe_camera_node(fallback_node));
             }
             std::string v4l2_err;
-            if (!v4l2_fallback.open_dev(fallback_node, cfg.width, cfg.height, cfg.fps, &v4l2_err)) {
+            if (!v4l2_fallback.open_dev(fallback_node, cfg.width, cfg.height, cfg.fps, 2, &v4l2_err)) {
                 log_msg(LogLevel::Error, "V4L2 direct camera open failed on " + fallback_node + ": " + v4l2_err);
                 log_msg(LogLevel::Error, "Set camera.device_path to an ISP node (often /dev/video11) and ensure no process owns the camera.");
                 return 3;
             }
             use_v4l2_fallback = true;
-            log_msg(LogLevel::Info, "Camera opened via V4L2 direct path on " + fallback_node);
+            log_msg(LogLevel::Info, "Camera opened via V4L2 direct path on " + fallback_node +
+                " (" + std::to_string(v4l2_fallback.width()) + "x" + std::to_string(v4l2_fallback.height()) + ", buffers=2)");
         } else {
             if (cfg.debug_enabled) {
                 const std::string summary = opencv_videoio_summary();
@@ -1124,7 +1128,7 @@ int main(int argc, char** argv) {
             if (!open_camera_with_diagnostics(cfg, &cap, &cam_diag)) {
                 log_msg(LogLevel::Error, "OpenCV camera open failed. " + cam_diag);
                 std::string v4l2_err;
-                if (!v4l2_fallback.open_dev(fallback_node, cfg.width, cfg.height, cfg.fps, &v4l2_err)) {
+                if (!v4l2_fallback.open_dev(fallback_node, cfg.width, cfg.height, cfg.fps, 4, &v4l2_err)) {
                     log_msg(LogLevel::Error, "V4L2 direct fallback failed on " + fallback_node + ": " + v4l2_err);
                     log_msg(LogLevel::Error, "Set camera.device_path to an ISP node (often /dev/video11) and ensure no process owns the camera.");
                     return 3;
